@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+signing_identity="${CAPS_TAP_SIGNING_IDENTITY:-Caps Tap Local}"
+if ! security find-identity -v -p codesigning | grep -Fq "\"$signing_identity\""; then
+  printf 'No valid code-signing identity named %s; create/trust it in Keychain Access.\n' "$signing_identity" >&2
+  exit 1
+fi
+cargo build --release --locked
+app="dist/Capstan.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp target/release/capstan "$app/Contents/MacOS/capstan"
+# Remove local symbols from the packaged copy, not the development artifact.
+# Signing must happen afterward because stripping changes executable bytes.
+xcrun strip -x "$app/Contents/MacOS/capstan"
+icon_tmp=$(mktemp -d)
+trap 'rm -rf "$icon_tmp"' EXIT
+# Compile the layered Icon Composer source instead of resizing a flattened
+# preview. actool supplies the asset catalog, legacy raster fallback, and the
+# matching plist keys; all three are needed for the system to resolve the icon.
+xcrun actool assets/capstan.icon \
+  --compile "$icon_tmp" \
+  --platform macosx --target-device mac --minimum-deployment-target 13.0 \
+  --app-icon capstan --output-partial-info-plist "$icon_tmp/icon-info.plist"
+# Remove the old name before copying: common macOS volumes are case-insensitive.
+rm -f "$app/Contents/Resources/Capstan.icns"
+cp "$icon_tmp/Assets.car" "$app/Contents/Resources/Assets.car"
+cp "$icon_tmp/capstan.icns" "$app/Contents/Resources/capstan.icns"
+cat > "$app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.andreasdeleuran.capstap</string>
+  <key>CFBundleName</key><string>Capstan</string>
+  <key>CFBundleDisplayName</key><string>Capstan</string>
+  <key>CFBundleExecutable</key><string>capstan</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+/usr/libexec/PlistBuddy -c "Merge $icon_tmp/icon-info.plist" "$app/Contents/Info.plist"
+codesign --force --sign "$signing_identity" --identifier dev.andreasdeleuran.capstap "$app"
+codesign --verify --deep --strict "$app"
+printf 'Built and signed %s with %s\n' "$app" "$signing_identity"

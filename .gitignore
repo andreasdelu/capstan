@@ -1,0 +1,12 @@
+/target/
+/dist/
+.DS_Store
+.env*
+*.p12
+*.pfx
+*.key
+*.pem
+*.crt
+*.cer
+*.csr
+*.mobileprovision

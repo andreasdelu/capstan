@@ -1,0 +1,53 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.06964,0.06987,0.07054,1.00000",
+      "display-p3:0.14837,0.14885,0.15029,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.52291,0.54240,0.53641,1.00000",
+              "display-p3:0.91386,0.93769,0.92714,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 1
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0
+              }
+            }
+          },
+          "glass" : true,
+          "image-name" : "CapstanSilhouette.png",
+          "name" : "Capstan silhouette",
+          "position" : {
+            "scale" : 1.05,
+            "translation-in-points" : [
+              138,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.25
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}
