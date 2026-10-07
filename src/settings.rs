@@ -2,22 +2,100 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use gpui_kit::{
-    App, Bounds, Context as ViewContext, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    rgb, size,
+    App, Bounds, Context as ViewContext, Entity, FontWeight, Subscription, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, size,
 };
 
-use crate::{Context, config, mac, start_input};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, IconName, Theme,
+    alert::Alert,
+    button::Button,
+    input::{InputEvent, InputState, NumberInput},
+    switch::Switch,
+};
+
+use super::{Context, config, mac, start_input};
+
+#[derive(Clone)]
+enum Feedback {
+    Success(String),
+    Error(String),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct SystemFacts {
+    permissions: mac::Permissions,
+    bundled: bool,
+    login: bool,
+}
 
 struct Settings {
+    #[cfg(test)]
+    system_facts: Option<SystemFacts>,
     input: Arc<Context>,
     input_error: Option<String>,
     needs_restart: bool,
-    message: Option<String>,
+    message: Option<Feedback>,
+    timeout_input: Option<Entity<InputState>>,
+    timeout_subscription: Option<Subscription>,
     config: config::Config,
     config_path: Result<std::path::PathBuf, String>,
 }
 
 impl Settings {
+    fn setup_timeout(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(self.config.escape_timeout_ms.to_string())
+                .step(50.)
+                .min(config::MIN_TIMEOUT_MS as f64)
+                .max(config::MAX_TIMEOUT_MS as f64)
+                .validate(|text, _| text.chars().all(|ch| ch.is_ascii_digit()))
+        });
+        self.timeout_subscription =
+            Some(
+                cx.subscribe_in(&state, window, |this, _, event, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.save_timeout(window, cx);
+                    }
+                }),
+            );
+        self.timeout_input = Some(state);
+    }
+
+    fn sync_timeout(&self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        if let Some(state) = &self.timeout_input {
+            state.update(cx, |state, cx| {
+                state.set_value(self.config.escape_timeout_ms.to_string(), window, cx)
+            });
+        }
+    }
+
+    fn save_timeout(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        let Some(state) = &self.timeout_input else {
+            return;
+        };
+        let text = state.read(cx).value();
+        let result = text
+            .parse::<u64>()
+            .map_err(|_| "Enter a whole number of milliseconds".into())
+            .and_then(|escape_timeout_ms| {
+                self.save(config::Config {
+                    escape_timeout_ms,
+                    ..self.config.clone()
+                })
+            });
+        self.message = Some(match result {
+            Ok(()) => {
+                self.sync_timeout(window, cx);
+                Feedback::Success("Escape window saved".into())
+            }
+            Err(error) => Feedback::Error(error),
+        });
+        cx.notify();
+    }
+
     fn apply(&mut self, config: config::Config) {
         if !self.needs_restart && self.input_error.is_none() {
             self.input.apply_config(&config);
@@ -42,194 +120,160 @@ impl Settings {
 
 impl Render for Settings {
     fn render(&mut self, _window: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+        let surface = theme.background;
+        let panel = theme.secondary.opacity(0.35);
         let remapping = self.input.enabled.load(Ordering::Acquire);
-        let login = mac::login_enabled();
-        let permissions = mac::permissions();
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .p_6()
-            .gap_4()
-            .bg(rgb(0x1b2230))
-            .text_color(rgb(0xe5edf7))
-            .child(div().text_xl().child("Caps Tap"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x91a4ba))
-                    .child("Caps → Control · tap alone → Escape"),
-            )
-            .when(
-                permissions.ready() && !self.needs_restart && self.input_error.is_none(),
-                |view| {
-                    view.child(
-                        div()
-                            .id("remapping")
-                            .flex()
-                            .justify_between()
-                            .p_4()
-                            .rounded_lg()
-                            .bg(rgb(0x2a3444))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.input_error.is_none() && !this.needs_restart {
-                                    let config = config::Config {
-                                        remapping_enabled: !this.config.remapping_enabled,
-                                        ..this.config.clone()
-                                    };
-                                    this.message = this.save(config).err();
-                                    cx.notify();
-                                }
-                            }))
-                            .child("Enable remapping")
-                            .child(if remapping { "On" } else { "Off" }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .items_center()
-                            .p_3()
-                            .rounded_lg()
-                            .bg(rgb(0x2a3444))
-                            .child(format!(
-                                "Escape window: {} ms",
-                                self.config.escape_timeout_ms
-                            ))
-                            .child(
-                                div()
-                                    .id("timeout-less")
-                                    .px_3()
-                                    .cursor_pointer()
-                                    .child("−")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let config = config::Config {
-                                            escape_timeout_ms: this
-                                                .config
-                                                .escape_timeout_ms
-                                                .saturating_sub(50)
-                                                .max(config::MIN_TIMEOUT_MS),
-                                            ..this.config.clone()
-                                        };
-                                        this.message = this.save(config).err();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id("timeout-more")
-                                    .px_3()
-                                    .cursor_pointer()
-                                    .child("+")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let config = config::Config {
-                                            escape_timeout_ms: (this.config.escape_timeout_ms + 50)
-                                                .min(config::MAX_TIMEOUT_MS),
-                                            ..this.config.clone()
-                                        };
-                                        this.message = this.save(config).err();
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("login")
-                            .flex()
-                            .justify_between()
-                            .p_4()
-                            .rounded_lg()
-                            .bg(rgb(0x2a3444))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.message = mac::set_login_enabled(!mac::login_enabled()).err();
+        #[cfg(test)]
+        let facts = self.system_facts.unwrap_or_else(|| SystemFacts {
+            permissions: mac::permissions(),
+            bundled: mac::bundled(),
+            login: mac::login_enabled(),
+        });
+        #[cfg(test)]
+        let (permissions, bundled, login) = (facts.permissions, facts.bundled, facts.login);
+        #[cfg(not(test))]
+        let (permissions, bundled, login) =
+            (mac::permissions(), mac::bundled(), mac::login_enabled());
+        let usable = permissions.ready() && !self.needs_restart && self.input_error.is_none();
+        let status = if !usable {
+            "Needs attention"
+        } else if remapping {
+            "Remapping on"
+        } else {
+            "Remapping off"
+        };
+        let status_color = if !usable {
+            theme.warning
+        } else if remapping {
+            theme.success
+        } else {
+            muted
+        };
+
+        div().id("settings-scroll").size_full().overflow_y_scroll()
+            .bg(surface).text_color(theme.foreground).font_family(theme.font_family.clone())
+            .child(div().flex().flex_col().gap_6().p_6()
+                .child(div().flex().justify_between().items_center()
+                    .child(div().flex().flex_col().gap_1()
+                        .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Caps Tap"))
+                        .child(div().text_sm().text_color(muted).child("One key. Two useful jobs.")))
+                    .child(div().flex().items_center().gap_2().px_3().py_1().rounded_full().bg(status_color.opacity(0.1))
+                        .child(div().size_2().rounded_full().bg(status_color))
+                        .child(div().text_sm().text_color(status_color).child(status))))
+                .child(div().flex().items_center().justify_between().gap_4().p_5().rounded_xl().bg(panel).border_1().border_color(border)
+                    .child(div().flex().flex_col().gap_2()
+                        .child(div().text_sm().text_color(muted).child("Tap alone"))
+                        .child(div().flex().items_center().gap_2().child(keycap("Caps", cx)).child(Icon::new(IconName::ArrowRight)).child(keycap("Esc", cx))))
+                    .child(div().w_px().h_10().bg(border))
+                    .child(div().flex().flex_col().gap_2()
+                        .child(div().text_sm().text_color(muted).child("Hold with another key"))
+                        .child(div().flex().items_center().gap_2().child(keycap("Caps", cx)).child(Icon::new(IconName::ArrowRight)).child(keycap("Ctrl", cx)))))
+                .when(!permissions.ready() || self.needs_restart, |view| view.child(self.permission_panel(permissions, cx)))
+                .when_some(self.input_error.clone(), |view, error| view.child(Alert::error("input-error", error)))
+                .when_some(self.message.clone(), |view, feedback| view.child(match feedback {
+                    Feedback::Success(text) => Alert::success("settings-message", text),
+                    Feedback::Error(text) => Alert::error("settings-message", text),
+                }))
+                .child(div().flex().flex_col().rounded_xl().border_1().border_color(border)
+                    .child(div().flex().justify_between().items_center().gap_4().p_4()
+                        .child(setting_label("Enable remapping", "Control immediately. Escape when tapped alone.", cx))
+                        .child(Switch::new("remapping").accessibility_label("Enable remapping").checked(remapping).disabled(!usable)
+                            .on_change(cx.listener(|this, enabled, _, cx| {
+                                let config = config::Config { remapping_enabled: *enabled, ..this.config.clone() };
+                                this.message = this.save(config).err().map(Feedback::Error);
                                 cx.notify();
-                            }))
-                            .child("Launch at login")
-                            .child(if login { "On" } else { "Off" }),
-                    )
-                },
-            )
-            .when(!permissions.ready() || self.needs_restart, |view| {
-                view.child(div().text_sm().text_color(rgb(0x91a4ba)).child(
-                    if permissions.ready() {
-                        "Permissions granted · quit and reopen to activate"
-                    } else {
-                        "Grant the missing permissions, then quit and reopen"
-                    },
-                ))
-                .child(
-                    div()
-                        .id("input-permission")
-                        .flex()
-                        .justify_between()
-                        .p_3()
-                        .rounded_lg()
-                        .bg(rgb(0x2a3444))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.message =
-                                mac::open_privacy_pane(mac::PrivacyPane::InputMonitoring).err();
-                            cx.notify();
-                        }))
-                        .child("Input Monitoring")
-                        .child(if permissions.input_monitoring {
-                            "Granted"
-                        } else {
-                            "Open Settings →"
-                        }),
-                )
-                .child(
-                    div()
-                        .id("accessibility-permission")
-                        .flex()
-                        .justify_between()
-                        .p_3()
-                        .rounded_lg()
-                        .bg(rgb(0x2a3444))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.message =
-                                mac::open_privacy_pane(mac::PrivacyPane::Accessibility).err();
-                            cx.notify();
-                        }))
-                        .child("Accessibility")
-                        .child(if permissions.accessibility {
-                            "Granted"
-                        } else {
-                            "Open Settings →"
-                        }),
-                )
-            })
-            .child(
-                div()
-                    .id("reload-settings")
-                    .p_3()
-                    .rounded_lg()
-                    .bg(rgb(0x2a3444))
-                    .cursor_pointer()
-                    .child("Reload Settings")
+                            }))))
+                    .child(div().h_px().bg(border))
+                    .child(div().flex().flex_col().gap_3().p_4()
+                        .child(setting_label("Escape window", "Release before this limit to send Escape. A longer hold cancels it.", cx))
+                        .child(div().flex().items_center().gap_3()
+                            .when_some(self.timeout_input.clone(), |view, state| view.child(div().w_40()
+                                .child(NumberInput::new(&state).suffix("ms").disabled(!usable))))
+                            .child(Button::new("apply-timeout").label("Apply").outline().disabled(!usable)
+                                .on_click(cx.listener(|this, _, window, cx| this.save_timeout(window, cx))))
+                            .child(div().text_xs().text_color(muted).child("50–2000 ms")))
+                        .child(div().text_xs().text_color(muted).child(format!("Active: {} ms · Changes apply to the next press", self.config.escape_timeout_ms))))
+                    .child(div().h_px().bg(border))
+                    .child(div().flex().justify_between().items_center().gap_4().p_4()
+                        .child(setting_label("Launch at login", if bundled { "Keep Caps Tap available when you sign in." } else { "Open the bundled app to enable launch at login." }, cx))
+                        .child(Switch::new("login").accessibility_label("Launch at login").checked(login).disabled(!bundled)
+                            .on_change(cx.listener(|this, enabled, _, cx| {
+                                this.message = mac::set_login_enabled(*enabled).err().map(Feedback::Error);
+                                cx.notify();
+                            })))))
+                .child(div().flex().flex_col().gap_3()
+                    .child(div().flex().justify_between().items_center()
+                        .child(div().font_weight(FontWeight::MEDIUM).child("Settings file"))
+                        .child(Button::new("reload-settings").label("Reload Settings").icon(IconName::RefreshCw).outline()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.message = Some(match this.reload() {
+                                    Ok(()) => { this.sync_timeout(window, cx); Feedback::Success("Settings reloaded".into()) },
+                                    Err(error) => Feedback::Error(format!("{error}. Current settings unchanged.")),
+                                });
+                                cx.notify();
+                            }))))
+                    .child(div().text_sm().text_color(muted).child("Edit the JSON, then reload. No restart or rebuild needed."))
+                    .child(div().p_3().rounded_lg().bg(panel).border_1().border_color(border).text_xs().text_color(muted)
+                        .child("~/Library/Application Support/Caps Tap/settings.json")))
+                .child(div().text_xs().text_color(muted).child("Closing this window keeps Caps Tap in the menu bar.")))
+    }
+}
+
+fn keycap(label: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .child(label)
+}
+
+fn setting_label(title: &'static str, detail: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .flex_1()
+        .min_w_0()
+        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(detail),
+        )
+}
+
+impl Settings {
+    fn permission_panel(
+        &self,
+        permissions: mac::Permissions,
+        cx: &mut ViewContext<Self>,
+    ) -> impl IntoElement {
+        div().flex().flex_col().gap_3()
+            .child(Alert::warning("permission-guidance", if permissions.ready() {
+                "Permissions granted. Quit and reopen Caps Tap to activate."
+            } else { "Grant the missing permissions in System Settings, then quit and reopen Caps Tap." }))
+            .child(div().flex().gap_2()
+                .child(Button::new("input-permission").label(if permissions.input_monitoring { "Input Monitoring granted" } else { "Input Monitoring" })
+                    .outline().icon(IconName::ExternalLink).disabled(permissions.input_monitoring)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.message = Some(match this.reload() {
-                            Ok(()) => "Settings reloaded".into(),
-                            Err(error) => format!("{error}. Current settings unchanged."),
-                        });
+                        this.message = mac::open_privacy_pane(mac::PrivacyPane::InputMonitoring).err().map(Feedback::Error);
                         cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x91a4ba))
-                    .child("JSON: ~/Library/Application Support/Caps Tap/settings.json"),
-            )
-            .when_some(self.input_error.clone(), |view, error| {
-                view.child(div().text_sm().text_color(rgb(0xf2ae87)).child(error))
-            })
-            .when_some(self.message.clone(), |view, message| {
-                view.child(div().text_sm().text_color(rgb(0xf2ae87)).child(message))
-            })
+                    })))
+                .child(Button::new("accessibility-permission").label(if permissions.accessibility { "Accessibility granted" } else { "Accessibility" })
+                    .outline().icon(IconName::ExternalLink).disabled(permissions.accessibility)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.message = mac::open_privacy_pane(mac::PrivacyPane::Accessibility).err().map(Feedback::Error);
+                        cx.notify();
+                    }))))
     }
 }
 
@@ -258,6 +302,7 @@ pub fn run(input: Arc<Context>) {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            Theme::sync_system_appearance(None, cx);
             let needs_restart = !mac::permissions().ready();
             let input_error = if needs_restart {
                 None
@@ -271,10 +316,15 @@ pub fn run(input: Arc<Context>) {
                 eprintln!("caps-tap: {error}");
             }
             let running = !needs_restart && input_error.is_none();
-            let bounds = Bounds::centered(None, size(px(600.), px(650.)), cx);
+            let bounds = Bounds::centered(None, size(px(560.), px(760.)), cx);
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(520.), px(560.))),
+                    titlebar: Some(gpui_kit::TitlebarOptions {
+                        title: Some("Caps Tap".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 cx,
@@ -285,13 +335,21 @@ pub fn run(input: Arc<Context>) {
                         mac::hide_settings();
                         false
                     });
-                    cx.new(|_| Settings {
-                        input,
-                        input_error,
-                        needs_restart,
-                        message,
-                        config,
-                        config_path,
+                    cx.new(|cx| {
+                        let mut settings = Settings {
+                            #[cfg(test)]
+                            system_facts: None,
+                            input,
+                            input_error,
+                            needs_restart,
+                            message: message.map(Feedback::Error),
+                            config,
+                            config_path,
+                            timeout_input: None,
+                            timeout_subscription: None,
+                        };
+                        settings.setup_timeout(window, cx);
+                        settings
                     })
                 },
             )
@@ -299,6 +357,161 @@ pub fn run(input: Arc<Context>) {
             mac::install_status_menu(running);
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+pub fn check_ui() {
+    use gpui_kit::component::ThemeMode;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AppContext, Focusable, HeadlessAppContext};
+    use std::fs;
+
+    let dir = std::env::temp_dir().join(format!("caps-tap-ui-test-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all("dist/qa").unwrap();
+    let path = dir.join("settings.json");
+    let active = config::Config {
+        remapping_enabled: true,
+        escape_timeout_ms: 400,
+    };
+    config::save(&path, &active).unwrap();
+    let input = Arc::new(Context::default());
+    input.apply_config(&active); // No native connection or event tap in this fixture.
+    let mut app = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::assets::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    app.update(gpui_kit::init);
+    let (handle, view) = app
+        .update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Default::default(),
+                        size: size(px(560.), px(760.)),
+                    })),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut settings = Settings {
+                            system_facts: Some(SystemFacts {
+                                permissions: mac::Permissions {
+                                    input_monitoring: true,
+                                    accessibility: true,
+                                },
+                                bundled: true,
+                                login: false,
+                            }),
+                            input: input.clone(),
+                            input_error: None,
+                            needs_restart: false,
+                            message: None,
+                            timeout_input: None,
+                            timeout_subscription: None,
+                            config: active.clone(),
+                            config_path: Ok(path.clone()),
+                        };
+                        settings.setup_timeout(window, cx);
+                        settings
+                    })
+                },
+            )
+        })
+        .unwrap();
+
+    app.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("remapping").checked(), Some(true));
+        assert!(window.find("apply-timeout").bounds().size.width > px(0.));
+        window.click("remapping", cx);
+        assert!(!input.enabled.load(Ordering::Acquire));
+        assert!(!config::load(&path).unwrap().remapping_enabled);
+        window.click("remapping", cx);
+        assert!(input.enabled.load(Ordering::Acquire));
+        let editor = view.read(cx).timeout_input.clone().unwrap();
+        editor.update(cx, |editor, cx| editor.set_value("550", window, cx));
+        window.render_frame(cx);
+        window.click("apply-timeout", cx);
+        assert_eq!(config::load(&path).unwrap().escape_timeout_ms, 550);
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 550);
+        editor.update(cx, |editor, cx| editor.set_value("650", window, cx));
+        window.focus(&editor.focus_handle(cx), cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    // Event subscriptions are deferred until the window update completes.
+    app.update_window(handle, |_, window, cx| {
+        let editor = view.read(cx).timeout_input.clone().unwrap();
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
+        editor.update(cx, |editor, cx| editor.set_value("20", window, cx));
+        window.render_frame(cx);
+        window.click("apply-timeout", cx);
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
+        assert!(matches!(view.read(cx).message, Some(Feedback::Error(_))));
+        fs::write(&path, "invalid JSON").unwrap();
+        window.click("reload-settings", cx);
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
+        let reloaded = config::Config {
+            escape_timeout_ms: 400,
+            ..active.clone()
+        };
+        config::save(&path, &reloaded).unwrap();
+        window.click("reload-settings", cx);
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
+        assert_eq!(editor.read(cx).value(), "400");
+        assert!(matches!(view.read(cx).message, Some(Feedback::Success(_))));
+        view.update(cx, |view, cx| {
+            view.message = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    app.capture_screenshot(handle)
+        .expect("Metal rendering unavailable")
+        .save("dist/qa/settings-light.png")
+        .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        Theme::change(ThemeMode::Dark, Some(window), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    app.capture_screenshot(handle)
+        .unwrap()
+        .save("dist/qa/settings-dark.png")
+        .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        Theme::change(ThemeMode::Light, Some(window), cx);
+        view.update(cx, |view, cx| {
+            view.system_facts.as_mut().unwrap().permissions = mac::Permissions {
+                input_monitoring: false,
+                accessibility: false,
+            };
+            view.needs_restart = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        // Kit does not report the switch's disabled property in this snapshot;
+        // the real click below verifies that its controlled value cannot change.
+        assert!(window.find("input-permission").bounds().size.width > px(0.));
+        window.click("remapping", cx);
+        assert!(input.enabled.load(Ordering::Acquire));
+    })
+    .unwrap();
+    app.capture_screenshot(handle)
+        .unwrap()
+        .save("dist/qa/settings-permissions.png")
+        .unwrap();
+    fs::remove_dir_all(dir).unwrap();
+    println!(
+        "Settings UI: real switch/apply/reload interactions and light/dark/permission Metal renders passed"
+    );
 }
 
 #[cfg(test)]
@@ -320,10 +533,13 @@ mod tests {
         let input = Arc::new(Context::default());
         input.apply_config(&active);
         let mut settings = Settings {
+            system_facts: None,
             input: input.clone(),
             input_error: None,
             needs_restart: false,
             message: None,
+            timeout_input: None,
+            timeout_subscription: None,
             config: active.clone(),
             config_path: Ok(path.clone()),
         };

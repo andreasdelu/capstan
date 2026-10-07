@@ -445,6 +445,12 @@ fn main() {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+pub fn check_settings_ui() {
+    settings::check_ui();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
