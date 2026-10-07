@@ -171,14 +171,6 @@ pub fn remapping_enabled() -> bool {
     }
 }
 
-pub fn save_remapping_enabled(enabled: bool) {
-    unsafe {
-        let defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
-        let key = NSString::alloc(nil).init_str("remappingEnabled");
-        let _: () = msg_send![defaults, setBool: enabled forKey: key];
-    }
-}
-
 pub fn login_enabled() -> bool {
     if !bundled() {
         return false;

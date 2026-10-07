@@ -6,13 +6,38 @@ use gpui::{
     prelude::*, px, rgb, size,
 };
 
-use crate::{Context, mac, start_input};
+use crate::{Context, config, mac, start_input};
 
 struct Settings {
     input: Arc<Context>,
     input_error: Option<String>,
     needs_restart: bool,
     message: Option<String>,
+    config: config::Config,
+    config_path: Result<std::path::PathBuf, String>,
+}
+
+impl Settings {
+    fn apply(&mut self, config: config::Config) {
+        if !self.needs_restart && self.input_error.is_none() {
+            self.input.apply_config(&config);
+        }
+        self.config = config;
+    }
+
+    fn save(&mut self, config: config::Config) -> Result<(), String> {
+        let path = self.config_path.as_ref().map_err(Clone::clone)?;
+        config::save(path, &config)?;
+        self.apply(config);
+        Ok(())
+    }
+
+    fn reload(&mut self) -> Result<(), String> {
+        let path = self.config_path.as_ref().map_err(Clone::clone)?;
+        let config = config::load(path)?;
+        self.apply(config);
+        Ok(())
+    }
 }
 
 impl Render for Settings {
@@ -49,14 +74,64 @@ impl Render for Settings {
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.input_error.is_none() && !this.needs_restart {
-                                    let enabled = !this.input.enabled.load(Ordering::Acquire);
-                                    this.input.set_enabled(enabled);
-                                    mac::save_remapping_enabled(enabled);
+                                    let config = config::Config {
+                                        remapping_enabled: !this.config.remapping_enabled,
+                                        ..this.config.clone()
+                                    };
+                                    this.message = this.save(config).err();
                                     cx.notify();
                                 }
                             }))
                             .child("Enable remapping")
                             .child(if remapping { "On" } else { "Off" }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(rgb(0x2a3444))
+                            .child(format!(
+                                "Escape window: {} ms",
+                                self.config.escape_timeout_ms
+                            ))
+                            .child(
+                                div()
+                                    .id("timeout-less")
+                                    .px_3()
+                                    .cursor_pointer()
+                                    .child("−")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let config = config::Config {
+                                            escape_timeout_ms: this
+                                                .config
+                                                .escape_timeout_ms
+                                                .saturating_sub(50)
+                                                .max(config::MIN_TIMEOUT_MS),
+                                            ..this.config.clone()
+                                        };
+                                        this.message = this.save(config).err();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("timeout-more")
+                                    .px_3()
+                                    .cursor_pointer()
+                                    .child("+")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let config = config::Config {
+                                            escape_timeout_ms: (this.config.escape_timeout_ms + 50)
+                                                .min(config::MAX_TIMEOUT_MS),
+                                            ..this.config.clone()
+                                        };
+                                        this.message = this.save(config).err();
+                                        cx.notify();
+                                    })),
+                            ),
                     )
                     .child(
                         div()
@@ -127,6 +202,28 @@ impl Render for Settings {
                         }),
                 )
             })
+            .child(
+                div()
+                    .id("reload-settings")
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgb(0x2a3444))
+                    .cursor_pointer()
+                    .child("Reload Settings")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.message = Some(match this.reload() {
+                            Ok(()) => "Settings reloaded".into(),
+                            Err(error) => format!("{error}. Current settings unchanged."),
+                        });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x91a4ba))
+                    .child("JSON: ~/Library/Application Support/Caps Tap/settings.json"),
+            )
             .when(
                 self.input_error.is_some() || self.message.is_some(),
                 |view| {
@@ -144,6 +241,17 @@ impl Render for Settings {
 }
 
 pub fn run(input: Arc<Context>) {
+    let config_path = config::path();
+    let loaded = config_path
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|path| config::load_or_create(path, mac::remapping_enabled()));
+    let message = loaded.as_ref().err().cloned();
+    // A broken file must not silently activate remapping or be overwritten.
+    let config = loaded.unwrap_or(config::Config {
+        remapping_enabled: false,
+        ..config::Config::default()
+    });
     Application::new().run(move |cx: &mut App| {
         let needs_restart = !mac::permissions().ready();
         let input_error = if needs_restart {
@@ -152,13 +260,13 @@ pub fn run(input: Arc<Context>) {
             start_input(&input).err()
         };
         if !needs_restart && input_error.is_none() {
-            input.set_enabled(mac::remapping_enabled());
+            input.apply_config(&config);
         }
         if let Some(error) = &input_error {
             eprintln!("caps-tap: {error}");
         }
         let running = !needs_restart && input_error.is_none();
-        let bounds = Bounds::centered(None, size(px(500.), px(470.)), cx);
+        let bounds = Bounds::centered(None, size(px(600.), px(650.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -175,7 +283,9 @@ pub fn run(input: Arc<Context>) {
                     input,
                     input_error,
                     needs_restart,
-                    message: None,
+                    message,
+                    config,
+                    config_path,
                 })
             },
         )

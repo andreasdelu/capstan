@@ -744,6 +744,8 @@ dependencies = [
  "cocoa 0.26.0",
  "gpui",
  "objc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

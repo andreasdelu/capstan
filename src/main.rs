@@ -3,9 +3,10 @@ compile_error!("caps-tap requires macOS");
 
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+mod config;
 mod mac;
 mod settings;
 use std::time::Duration;
@@ -26,6 +27,7 @@ const SOURCE_USER_DATA_FIELD: u32 = 42;
 const CAPS_LOCK_FLAG: u64 = 1 << 16;
 const CONTROL_FLAG: u64 = 1 << 18;
 const SYNTHETIC_TAG: i64 = 0x0043_4150_5354_4150;
+#[cfg(test)]
 const ALONE_TIMEOUT: Duration = Duration::from_millis(300);
 const KEYBOARD_USAGE_PAGE: u32 = 0x07;
 const CAPS_USAGE: u32 = 0x39;
@@ -102,12 +104,14 @@ struct Context {
     tap: AtomicPtr<c_void>,
     enabled: AtomicBool,
     caps_lock: OnceLock<mac::CapsLock>,
+    escape_timeout_ms: AtomicU64,
 }
 
 #[derive(Default)]
 struct State {
     pressed_at: Option<Duration>,
     chorded: bool,
+    timeout: Duration,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -118,11 +122,12 @@ enum Action {
 }
 
 impl State {
-    fn press(&mut self, now: Duration) -> Option<Action> {
+    fn press(&mut self, now: Duration, timeout: Duration) -> Option<Action> {
         if self.pressed_at.is_some() {
             return None;
         }
         self.pressed_at = Some(now);
+        self.timeout = timeout;
         self.chorded = false;
         Some(Action::ControlDown)
     }
@@ -133,11 +138,12 @@ impl State {
         }
     }
 
-    fn release(&mut self, now: Duration, timeout: Duration) -> Vec<Action> {
+    fn release(&mut self, now: Duration) -> Vec<Action> {
         let Some(started) = self.pressed_at.take() else {
             return vec![];
         };
         let duration = now.saturating_sub(started);
+        let timeout = self.timeout;
         let alone = !self.chorded && duration < timeout;
         if debug() {
             eprintln!(
@@ -192,14 +198,17 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
     }
     let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
     if down {
-        if let Some(action) = state.press(timestamp) {
+        if let Some(action) = state.press(
+            timestamp,
+            Duration::from_millis(context.escape_timeout_ms.load(Ordering::Acquire)),
+        ) {
             unsafe {
                 emit(action, None);
             }
         }
     } else {
         context.clear_caps_lock();
-        for action in state.release(timestamp, ALONE_TIMEOUT) {
+        for action in state.release(timestamp) {
             unsafe {
                 emit(action, None);
             }
@@ -337,6 +346,12 @@ fn keyboard_matching() -> Option<Ref> {
 }
 
 impl Context {
+    fn apply_config(&self, config: &config::Config) {
+        self.escape_timeout_ms
+            .store(config.escape_timeout_ms, Ordering::Release);
+        self.set_enabled(config.remapping_enabled);
+    }
+
     fn clear_caps_lock(&self) {
         if let Some(lock) = self.caps_lock.get()
             && let Err(error) = lock.clear()
@@ -409,7 +424,7 @@ fn start_input(context: &Context) -> Result<(), String> {
         CFRelease(source);
         // The run loop retains the tap source; HID manager and context live until app exit.
     }
-    context.enabled.store(true, Ordering::Release);
+    // Settings activates input only after configuration has loaded successfully.
     Ok(())
 }
 
@@ -443,21 +458,21 @@ mod tests {
     fn quick_tap_is_control_then_escape() {
         let now = Duration::ZERO;
         let mut s = State::default();
-        assert_eq!(s.press(now), Some(Action::ControlDown));
+        assert_eq!(s.press(now, ALONE_TIMEOUT), Some(Action::ControlDown));
         assert_eq!(
-            s.release(now + Duration::from_millis(100), ALONE_TIMEOUT),
+            s.release(now + Duration::from_millis(100)),
             vec![Action::ControlUp, Action::Escape]
         );
-        assert!(s.release(now, ALONE_TIMEOUT).is_empty());
+        assert!(s.release(now).is_empty());
     }
 
     #[test]
     fn hold_releases_control_without_escape() {
         let now = Duration::ZERO;
         let mut s = State::default();
-        assert_eq!(s.press(now), Some(Action::ControlDown));
+        assert_eq!(s.press(now, ALONE_TIMEOUT), Some(Action::ControlDown));
         assert_eq!(
-            s.release(now + Duration::from_millis(300), ALONE_TIMEOUT),
+            s.release(now + Duration::from_millis(300)),
             vec![Action::ControlUp]
         );
     }
@@ -466,10 +481,10 @@ mod tests {
     fn chord_releases_control_without_escape() {
         let now = Duration::ZERO;
         let mut s = State::default();
-        s.press(now);
+        s.press(now, ALONE_TIMEOUT);
         s.chord();
         assert_eq!(
-            s.release(now + Duration::from_millis(10), ALONE_TIMEOUT),
+            s.release(now + Duration::from_millis(10)),
             vec![Action::ControlUp]
         );
     }
@@ -480,14 +495,26 @@ mod tests {
         // 299 ms press remains a tap, but exactly 300 ms is a cancelled hold.
         let pressed = Duration::from_secs(10);
         let mut s = State::default();
-        s.press(pressed);
+        s.press(pressed, ALONE_TIMEOUT);
         assert_eq!(
-            s.release(pressed + Duration::from_millis(299), ALONE_TIMEOUT),
+            s.release(pressed + Duration::from_millis(299)),
             vec![Action::ControlUp, Action::Escape]
         );
-        s.press(pressed);
+        s.press(pressed, ALONE_TIMEOUT);
+        assert_eq!(s.release(pressed + ALONE_TIMEOUT), vec![Action::ControlUp]);
+    }
+
+    #[test]
+    fn timeout_changes_apply_to_the_next_press_not_an_active_hold() {
+        let mut s = State::default();
+        s.press(Duration::ZERO, Duration::from_millis(500));
         assert_eq!(
-            s.release(pressed + ALONE_TIMEOUT, ALONE_TIMEOUT),
+            s.release(Duration::from_millis(400)),
+            vec![Action::ControlUp, Action::Escape]
+        );
+        s.press(Duration::from_secs(1), ALONE_TIMEOUT);
+        assert_eq!(
+            s.release(Duration::from_millis(1400)),
             vec![Action::ControlUp]
         );
     }
@@ -496,8 +523,8 @@ mod tests {
     fn repeated_down_and_cancel_do_not_stick() {
         let now = Duration::ZERO;
         let mut s = State::default();
-        s.press(now);
-        assert_eq!(s.press(now), None);
+        s.press(now, ALONE_TIMEOUT);
+        assert_eq!(s.press(now, ALONE_TIMEOUT), None);
         assert_eq!(s.cancel(), Some(Action::ControlUp));
         assert_eq!(s.cancel(), None);
     }
