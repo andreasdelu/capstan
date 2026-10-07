@@ -23,6 +23,7 @@ const TAP_DISABLED_BY_TIMEOUT: u32 = 0xffff_fffe;
 const TAP_DISABLED_BY_USER_INPUT: u32 = 0xffff_ffff;
 const KEYCODE_FIELD: u32 = 9;
 const SOURCE_USER_DATA_FIELD: u32 = 42;
+const CAPS_LOCK_FLAG: u64 = 1 << 16;
 const CONTROL_FLAG: u64 = 1 << 18;
 const SYNTHETIC_TAG: i64 = 0x0043_4150_5354_4150;
 const ALONE_TIMEOUT: Duration = Duration::from_millis(300);
@@ -99,6 +100,7 @@ struct Context {
     state: Mutex<State>,
     tap: AtomicPtr<c_void>,
     enabled: AtomicBool,
+    caps_lock: OnceLock<mac::CapsLock>,
 }
 
 #[derive(Default)]
@@ -179,6 +181,7 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
             }
         }
     } else {
+        context.clear_caps_lock();
         for action in state.release(Instant::now()) {
             unsafe {
                 emit(action, None);
@@ -245,7 +248,12 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
         if debug() {
             eprintln!("[caps-tap] filtered processed Caps event");
         }
+        context.clear_caps_lock();
         return ptr::null_mut();
+    }
+    // Filtering Caps events alone does not remove the native lock bit from later input.
+    unsafe {
+        CGEventSetFlags(event, remapped_flags(CGEventGetFlags(event), false));
     }
     if matches!(
         kind,
@@ -258,12 +266,16 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
                 state.chord();
             }
             unsafe {
-                CGEventSetFlags(event, CGEventGetFlags(event) | CONTROL_FLAG);
+                CGEventSetFlags(event, remapped_flags(CGEventGetFlags(event), true));
             }
         }
     }
     let _ = proxy;
     event
+}
+
+fn remapped_flags(flags: u64, control_pressed: bool) -> u64 {
+    (flags & !CAPS_LOCK_FLAG) | if control_pressed { CONTROL_FLAG } else { 0 }
 }
 
 fn keyboard_matching() -> Option<Ref> {
@@ -305,8 +317,18 @@ fn keyboard_matching() -> Option<Ref> {
 }
 
 impl Context {
+    fn clear_caps_lock(&self) {
+        if let Some(lock) = self.caps_lock.get()
+            && let Err(error) = lock.clear()
+        {
+            eprintln!("{error}");
+        }
+    }
+
     fn set_enabled(&self, enabled: bool) {
-        if !enabled {
+        if enabled {
+            self.clear_caps_lock();
+        } else {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(action) = state.cancel() {
                 unsafe {
@@ -319,6 +341,10 @@ impl Context {
 }
 
 fn start_input(context: &Context) -> Result<(), String> {
+    // Native Caps state changes below the CGEvent tap, so explicitly reset it too.
+    let caps_lock = mac::CapsLock::open()?;
+    caps_lock.clear()?;
+    let _ = context.caps_lock.set(caps_lock);
     let run_loop = unsafe { CFRunLoopGetCurrent() };
     let hid = unsafe { IOHIDManagerCreate(ptr::null_mut(), 0) };
     if hid.is_null() {
@@ -374,6 +400,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remapping_removes_caps_lock_but_preserves_other_modifiers() {
+        let shift = 1 << 17;
+        let command = 1 << 20;
+        assert_eq!(
+            remapped_flags(CAPS_LOCK_FLAG | shift | command, false),
+            shift | command
+        );
+        assert_eq!(
+            remapped_flags(CAPS_LOCK_FLAG | shift, true),
+            shift | CONTROL_FLAG
+        );
+        assert_eq!(
+            remapped_flags(CAPS_LOCK_FLAG | CONTROL_FLAG, false),
+            CONTROL_FLAG
+        );
+    }
 
     #[test]
     fn quick_tap_is_control_then_escape() {

@@ -20,6 +20,64 @@ unsafe extern "C" {
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     fn IOHIDCheckAccess(request_type: u32) -> u32;
+    fn IOServiceMatching(name: *const i8) -> *mut std::ffi::c_void;
+    fn IOServiceGetMatchingService(port: u32, matching: *mut std::ffi::c_void) -> u32;
+    fn IOServiceOpen(service: u32, task: u32, kind: u32, connection: *mut u32) -> i32;
+    fn IOServiceClose(connection: u32) -> i32;
+    fn IOObjectRelease(object: u32) -> i32;
+    fn IOHIDGetModifierLockState(connection: u32, selector: i32, state: *mut bool) -> i32;
+    fn IOHIDSetModifierLockState(connection: u32, selector: i32, state: bool) -> i32;
+}
+
+unsafe extern "C" {
+    static mach_task_self_: u32;
+}
+
+// A parameter connection, not an exclusive keyboard grab. macOS owns the lock
+// state before the event tap runs; dropping a CGEvent cannot undo that state.
+pub struct CapsLock(u32);
+
+impl CapsLock {
+    pub fn open() -> Result<Self, String> {
+        unsafe {
+            let matching = IOServiceMatching(c"IOHIDSystem".as_ptr());
+            if matching.is_null() {
+                return Err("Could not match IOHIDSystem".into());
+            }
+            let service = IOServiceGetMatchingService(0, matching);
+            if service == 0 {
+                return Err("Could not find IOHIDSystem".into());
+            }
+            let mut connection = 0;
+            let result = IOServiceOpen(service, mach_task_self_, 1, &mut connection);
+            IOObjectRelease(service);
+            if result != 0 {
+                return Err(format!("Could not open Caps Lock control ({result:#x})"));
+            }
+            Ok(Self(connection))
+        }
+    }
+
+    pub fn clear(&self) -> Result<(), String> {
+        let mut locked = false;
+        let mut result = unsafe { IOHIDGetModifierLockState(self.0, 1, &mut locked) };
+        if result == 0 && locked {
+            result = unsafe { IOHIDSetModifierLockState(self.0, 1, false) };
+        }
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(format!("Could not clear native Caps Lock ({result:#x})"))
+        }
+    }
+}
+
+impl Drop for CapsLock {
+    fn drop(&mut self) {
+        unsafe {
+            IOServiceClose(self.0);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
