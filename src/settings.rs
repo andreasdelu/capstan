@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use gpui::{
-    App, Application, Bounds, Context as ViewContext, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+use gpui_kit::{
+    App, Bounds, Context as ViewContext, Window, WindowBounds, WindowOptions, div, prelude::*, px,
+    rgb, size,
 };
 
 use crate::{Context, config, mac, start_input};
@@ -254,47 +254,51 @@ pub fn run(input: Arc<Context>) {
         .map_err(Clone::clone)
         .and_then(|path| config::load_or_create(path, mac::remapping_enabled()));
     let (config, message) = startup_config(loaded);
-    Application::new().run(move |cx: &mut App| {
-        let needs_restart = !mac::permissions().ready();
-        let input_error = if needs_restart {
-            None
-        } else {
-            start_input(&input).err()
-        };
-        if !needs_restart && input_error.is_none() {
-            input.apply_config(&config);
-        }
-        if let Some(error) = &input_error {
-            eprintln!("caps-tap: {error}");
-        }
-        let running = !needs_restart && input_error.is_none();
-        let bounds = Bounds::centered(None, size(px(600.), px(650.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                // Hide rather than close: the menu bar reopens the window while the
-                // HID listener keeps running.
-                window.on_window_should_close(cx, |_, _| {
-                    mac::hide_settings();
-                    false
-                });
-                cx.new(|_| Settings {
-                    input,
-                    input_error,
-                    needs_restart,
-                    message,
-                    config,
-                    config_path,
-                })
-            },
-        )
-        .expect("failed to open settings window");
-        mac::install_status_menu(running);
-        cx.activate(true);
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_kit::init(cx);
+            let needs_restart = !mac::permissions().ready();
+            let input_error = if needs_restart {
+                None
+            } else {
+                start_input(&input).err()
+            };
+            if !needs_restart && input_error.is_none() {
+                input.apply_config(&config);
+            }
+            if let Some(error) = &input_error {
+                eprintln!("caps-tap: {error}");
+            }
+            let running = !needs_restart && input_error.is_none();
+            let bounds = Bounds::centered(None, size(px(600.), px(650.)), cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    // Hide rather than close: the menu bar reopens the window while the
+                    // HID listener keeps running.
+                    window.on_window_should_close(cx, |_, _| {
+                        mac::hide_settings();
+                        false
+                    });
+                    cx.new(|_| Settings {
+                        input,
+                        input_error,
+                        needs_restart,
+                        message,
+                        config,
+                        config_path,
+                    })
+                },
+            )
+            .expect("failed to open settings window");
+            mac::install_status_menu(running);
+            cx.activate(true);
+        });
 }
 
 #[cfg(test)]

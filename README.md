@@ -1,6 +1,6 @@
 # Caps Tap
 
-Experimental macOS Caps Lock remapper with a GPUI settings window. Caps acts as Control immediately; if released alone within the configured window (300 ms by default), Escape is sent. A chord or longer hold sends no Escape, matching Andreas's Karabiner rule.
+Experimental macOS Caps Lock remapper with a GPUI Kit settings window. Caps acts as Control immediately; if released alone within the configured window (300 ms by default), Escape is sent. A chord or longer hold sends no Escape, matching Andreas's Karabiner rule.
 
 ## Build and try
 
