@@ -6,11 +6,12 @@ use gpui_kit::{
     WindowOptions, div, prelude::*, px, size,
 };
 
+use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Theme,
     alert::Alert,
     button::Button,
-    input::{InputEvent, InputState, NumberInput},
+    input::{Input, InputEvent, InputState},
     switch::Switch,
 };
 
@@ -68,6 +69,25 @@ impl Settings {
         if let Some(state) = &self.timeout_input {
             state.update(cx, |state, cx| {
                 state.set_value(self.config.escape_timeout_ms.to_string(), window, cx)
+            });
+        }
+    }
+
+    fn step_timeout(&mut self, increment: bool, window: &mut Window, cx: &mut ViewContext<Self>) {
+        if let Some(state) = &self.timeout_input {
+            let draft = state
+                .read(cx)
+                .value()
+                .parse::<u64>()
+                .unwrap_or(self.config.escape_timeout_ms);
+            let value = if increment {
+                draft.saturating_add(50)
+            } else {
+                draft.saturating_sub(50)
+            }
+            .clamp(config::MIN_TIMEOUT_MS, config::MAX_TIMEOUT_MS);
+            state.update(cx, |state, cx| {
+                state.set_value(value.to_string(), window, cx)
             });
         }
     }
@@ -172,11 +192,11 @@ impl Render for Settings {
                         .child(div().text_sm().text_color(muted).child("Hold with another key"))
                         .child(div().flex().items_center().gap_2().child(keycap("Caps", cx)).child(Icon::new(IconName::ArrowRight)).child(keycap("Ctrl", cx)))))
                 .when(!permissions.ready() || self.needs_restart, |view| view.child(self.permission_panel(permissions, cx)))
-                .when_some(self.input_error.clone(), |view, error| view.child(Alert::error("input-error", error)))
-                .when_some(self.message.clone(), |view, feedback| view.child(match feedback {
-                    Feedback::Success(text) => Alert::success("settings-message", text),
-                    Feedback::Error(text) => Alert::error("settings-message", text),
-                }))
+                .when_some(self.input_error.clone(), |view, error| view.child(div().id("input-error").test_support().child(Alert::error("input-alert", error))))
+                .when_some(self.message.clone(), |view, feedback| view.child(div().id("settings-message").test_support().child(match feedback {
+                    Feedback::Success(text) => Alert::success("settings-alert", text),
+                    Feedback::Error(text) => Alert::error("settings-alert", text),
+                })))
                 .child(div().flex().flex_col().rounded_xl().border_1().border_color(border)
                     .child(div().flex().justify_between().items_center().gap_4().p_4()
                         .child(setting_label("Enable remapping", "Control immediately. Escape when tapped alone.", cx))
@@ -190,12 +210,20 @@ impl Render for Settings {
                     .child(div().flex().flex_col().gap_3().p_4()
                         .child(setting_label("Escape window", "Release before this limit to send Escape. A longer hold cancels it.", cx))
                         .child(div().flex().items_center().gap_3()
-                            .when_some(self.timeout_input.clone(), |view, state| view.child(div().w_40()
-                                .child(NumberInput::new(&state).suffix("ms").disabled(!usable))))
+                            .child(Button::new("timeout-less").icon(IconName::Minus).accessibility_label("Decrease Escape window by 50 ms").tooltip("Decrease Escape window by 50 ms").disabled(!usable)
+                                .on_click(cx.listener(|this, _, window, cx| this.step_timeout(false, window, cx))))
+                            .when_some(self.timeout_input.clone(), |view, state| view.child(Input::new(&state)
+                                .id("escape-timeout").aria_label("Escape window in milliseconds").suffix("ms").w(px(112.)).disabled(!usable)))
+                            .child(Button::new("timeout-more").icon(IconName::Plus).accessibility_label("Increase Escape window by 50 ms").tooltip("Increase Escape window by 50 ms").disabled(!usable)
+                                .on_click(cx.listener(|this, _, window, cx| this.step_timeout(true, window, cx))))
                             .child(Button::new("apply-timeout").label("Apply").outline().disabled(!usable)
                                 .on_click(cx.listener(|this, _, window, cx| this.save_timeout(window, cx))))
                             .child(div().text_xs().text_color(muted).child("50–2000 ms")))
-                        .child(div().text_xs().text_color(muted).child(format!("Active: {} ms · Changes apply to the next press", self.config.escape_timeout_ms))))
+                        .child(div().text_xs().text_color(muted).child(if usable {
+                            format!("Active: {} ms · Changes apply to the next press", self.config.escape_timeout_ms)
+                        } else {
+                            format!("Saved: {} ms · Available after restart", self.config.escape_timeout_ms)
+                        })))
                     .child(div().h_px().bg(border))
                     .child(div().flex().justify_between().items_center().gap_4().p_4()
                         .child(setting_label("Launch at login", if bundled { "Keep Caps Tap available when you sign in." } else { "Open the bundled app to enable launch at login." }, cx))
@@ -428,20 +456,48 @@ pub fn check_ui() {
         window.render_frame(cx);
         assert_eq!(window.find("remapping").checked(), Some(true));
         assert!(window.find("apply-timeout").bounds().size.width > px(0.));
+        assert_eq!(
+            window.find("escape-timeout").label(),
+            Some("Escape window in milliseconds")
+        );
+        window.click("timeout-more", cx);
+        assert_eq!(
+            view.read(cx)
+                .timeout_input
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .value(),
+            "450"
+        );
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
+        window.click("timeout-less", cx);
         window.click("remapping", cx);
         assert!(!input.enabled.load(Ordering::Acquire));
         assert!(!config::load(&path).unwrap().remapping_enabled);
         window.click("remapping", cx);
         assert!(input.enabled.load(Ordering::Acquire));
+        window.click("escape-timeout", cx);
+        window.press("cmd-a", cx);
+        window.input("550", cx);
+    })
+    .unwrap();
+    app.update_window(handle, |_, window, cx| {
         let editor = view.read(cx).timeout_input.clone().unwrap();
-        editor.update(cx, |editor, cx| editor.set_value("550", window, cx));
-        window.render_frame(cx);
+        assert_eq!(editor.read(cx).value(), "550");
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
+        assert_eq!(config::load(&path).unwrap().escape_timeout_ms, 400);
         window.click("apply-timeout", cx);
         assert_eq!(config::load(&path).unwrap().escape_timeout_ms, 550);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 550);
         editor.update(cx, |editor, cx| editor.set_value("650", window, cx));
         window.focus(&editor.focus_handle(cx), cx);
         window.render_frame(cx);
+        assert_eq!(window.find("escape-timeout").focused(), Some(true));
+        window.press("tab", cx);
+        assert_eq!(window.find("timeout-more").focused(), Some(true));
+        window.press("shift-tab", cx);
+        assert_eq!(window.find("escape-timeout").focused(), Some(true));
         window.press("enter", cx);
     })
     .unwrap();
@@ -489,6 +545,7 @@ pub fn check_ui() {
     app.update_window(handle, |_, window, cx| {
         Theme::change(ThemeMode::Light, Some(window), cx);
         view.update(cx, |view, cx| {
+            view.input = Arc::new(Context::default());
             view.system_facts.as_mut().unwrap().permissions = mac::Permissions {
                 input_monitoring: false,
                 accessibility: false,
@@ -501,12 +558,49 @@ pub fn check_ui() {
         // the real click below verifies that its controlled value cannot change.
         assert!(window.find("input-permission").bounds().size.width > px(0.));
         window.click("remapping", cx);
-        assert!(input.enabled.load(Ordering::Acquire));
+        assert!(!view.read(cx).input.enabled.load(Ordering::Acquire));
     })
     .unwrap();
     app.capture_screenshot(handle)
         .unwrap()
         .save("dist/qa/settings-permissions.png")
+        .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        view.update(cx, |view, cx| {
+            view.system_facts.as_mut().unwrap().permissions = mac::Permissions {
+                input_monitoring: true,
+                accessibility: true,
+            };
+            view.needs_restart = false;
+            view.input_error = Some("Could not create event tap: test fixture".into());
+            cx.notify();
+        });
+        config::save(
+            &path,
+            &config::Config {
+                escape_timeout_ms: 500,
+                ..active
+            },
+        )
+        .unwrap();
+        window.render_frame(cx);
+        window.click("reload-settings", cx);
+        assert_eq!(view.read(cx).config.escape_timeout_ms, 500);
+        assert!(!view.read(cx).input.enabled.load(Ordering::Acquire));
+        assert_eq!(
+            view.read(cx)
+                .input
+                .escape_timeout_ms
+                .load(Ordering::Acquire),
+            0
+        );
+        assert!(window.find("input-error").bounds().size.height > px(0.));
+        assert!(window.find("settings-message").bounds().size.height > px(0.));
+    })
+    .unwrap();
+    app.capture_screenshot(handle)
+        .unwrap()
+        .save("dist/qa/settings-input-error.png")
         .unwrap();
     fs::remove_dir_all(dir).unwrap();
     println!(
