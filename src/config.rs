@@ -99,9 +99,18 @@ mod tests {
             r#"{"escape_timeout_ms":2001}"#,
             r#"{"escape_timeout_ms":-1}"#,
             r#"{"escape_timeout_ms":"300"}"#,
+            r#"{"remapping_enabled":"true"}"#,
             r#"{"escape_timeot_ms":500}"#,
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
+        }
+        for value in [50, 2000] {
+            assert_eq!(
+                Config::parse(&format!(r#"{{"escape_timeout_ms":{value}}}"#))
+                    .unwrap()
+                    .escape_timeout_ms,
+                value
+            );
         }
         assert_eq!(
             Config::parse(r#"{"escape_timeout_ms":500}"#)

@@ -48,9 +48,29 @@ pub fn hid_timestamp(ticks: u64) -> std::time::Duration {
         assert!(result == 0 && info.denom != 0, "mach timebase unavailable");
         info
     });
-    let nanos =
-        (ticks as u128 * info.numer as u128 / info.denom as u128).min(u64::MAX as u128) as u64;
+    ticks_to_duration(ticks, info.numer, info.denom)
+}
+
+fn ticks_to_duration(ticks: u64, numer: u32, denom: u32) -> std::time::Duration {
+    let nanos = (ticks as u128 * numer as u128 / denom as u128).min(u64::MAX as u128) as u64;
     std::time::Duration::from_nanos(nanos)
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn converts_non_unit_timebase_without_intermediate_overflow() {
+        assert_eq!(
+            ticks_to_duration(72_000_000, 125, 3),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            ticks_to_duration(u64::MAX, 125, 3),
+            std::time::Duration::from_nanos(u64::MAX)
+        );
+    }
 }
 
 // A parameter connection, not an exclusive keyboard grab. macOS owns the lock

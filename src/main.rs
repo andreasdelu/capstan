@@ -288,7 +288,7 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
         let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.pressed_at.is_some() {
             // Key-up itself is not a new chord; key-down and modifier changes are.
-            if kind != KEY_UP {
+            if cancels_escape(kind, key, false) {
                 if debug() && !state.chorded {
                     eprintln!("[caps-tap] chord: event_type={kind}, keycode={key}");
                 }
@@ -301,6 +301,15 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
     }
     let _ = proxy;
     event
+}
+
+fn cancels_escape(kind: u32, key: i64, synthetic: bool) -> bool {
+    !synthetic
+        && !(kind == FLAGS_CHANGED && key == CAPS)
+        && matches!(
+            kind,
+            KEY_DOWN | FLAGS_CHANGED | LEFT_MOUSE_DOWN | RIGHT_MOUSE_DOWN | OTHER_MOUSE_DOWN
+        )
 }
 
 fn remapped_flags(flags: u64, control_pressed: bool) -> u64 {
@@ -378,7 +387,6 @@ impl Context {
 fn start_input(context: &Context) -> Result<(), String> {
     // Native Caps state changes below the CGEvent tap, so explicitly reset it too.
     let caps_lock = mac::CapsLock::open()?;
-    caps_lock.clear()?;
     let _ = context.caps_lock.set(caps_lock);
     let run_loop = unsafe { CFRunLoopGetCurrent() };
     let hid = unsafe { IOHIDManagerCreate(ptr::null_mut(), 0) };
@@ -490,14 +498,13 @@ mod tests {
     }
 
     #[test]
-    fn event_duration_decides_escape_even_when_callbacks_are_delayed() {
-        // Delivery time is deliberately not part of the state API: a queued
-        // 299 ms press remains a tap, but exactly 300 ms is a cancelled hold.
+    fn event_duration_uses_the_exact_timeout_cutoff() {
+        // Pure duration policy test, not proof of native callback delivery.
         let pressed = Duration::from_secs(10);
         let mut s = State::default();
         s.press(pressed, ALONE_TIMEOUT);
         assert_eq!(
-            s.release(pressed + Duration::from_millis(299)),
+            s.release(pressed + ALONE_TIMEOUT - Duration::from_nanos(1)),
             vec![Action::ControlUp, Action::Escape]
         );
         s.press(pressed, ALONE_TIMEOUT);
@@ -506,17 +513,46 @@ mod tests {
 
     #[test]
     fn timeout_changes_apply_to_the_next_press_not_an_active_hold() {
-        let mut s = State::default();
-        s.press(Duration::ZERO, Duration::from_millis(500));
+        let input = Context::default();
+        input.apply_config(&config::Config {
+            escape_timeout_ms: 500,
+            ..config::Config::default()
+        });
+        input.state.lock().unwrap().press(
+            Duration::ZERO,
+            Duration::from_millis(input.escape_timeout_ms.load(Ordering::Acquire)),
+        );
+        input.apply_config(&config::Config::default());
+        let mut state = input.state.lock().unwrap();
+        assert_eq!(state.press(Duration::from_millis(100), ALONE_TIMEOUT), None);
         assert_eq!(
-            s.release(Duration::from_millis(400)),
+            state.release(Duration::from_millis(400)),
             vec![Action::ControlUp, Action::Escape]
         );
-        s.press(Duration::from_secs(1), ALONE_TIMEOUT);
+        state.press(
+            Duration::from_secs(1),
+            Duration::from_millis(input.escape_timeout_ms.load(Ordering::Acquire)),
+        );
         assert_eq!(
-            s.release(Duration::from_millis(1400)),
+            state.release(Duration::from_millis(1400)),
             vec![Action::ControlUp]
         );
+    }
+
+    #[test]
+    fn chord_policy_ignores_key_up_caps_transitions_and_synthetic_input() {
+        for kind in [
+            KEY_DOWN,
+            FLAGS_CHANGED,
+            LEFT_MOUSE_DOWN,
+            RIGHT_MOUSE_DOWN,
+            OTHER_MOUSE_DOWN,
+        ] {
+            assert!(cancels_escape(kind, 0, false));
+            assert!(!cancels_escape(kind, 0, true));
+        }
+        assert!(!cancels_escape(KEY_UP, 0, false));
+        assert!(!cancels_escape(FLAGS_CHANGED, CAPS, false));
     }
 
     #[test]
@@ -527,5 +563,14 @@ mod tests {
         assert_eq!(s.press(now, ALONE_TIMEOUT), None);
         assert_eq!(s.cancel(), Some(Action::ControlUp));
         assert_eq!(s.cancel(), None);
+        assert!(s.release(now + Duration::from_millis(100)).is_empty());
+        assert_eq!(
+            s.press(now + Duration::from_secs(1), ALONE_TIMEOUT),
+            Some(Action::ControlDown)
+        );
+        assert_eq!(
+            s.release(now + Duration::from_millis(1100)),
+            vec![Action::ControlUp, Action::Escape]
+        );
     }
 }

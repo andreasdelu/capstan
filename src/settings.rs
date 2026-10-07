@@ -224,19 +224,26 @@ impl Render for Settings {
                     .text_color(rgb(0x91a4ba))
                     .child("JSON: ~/Library/Application Support/Caps Tap/settings.json"),
             )
-            .when(
-                self.input_error.is_some() || self.message.is_some(),
-                |view| {
-                    view.child(
-                        div().text_sm().text_color(rgb(0xf2ae87)).child(
-                            self.input_error
-                                .clone()
-                                .or_else(|| self.message.clone())
-                                .unwrap_or_default(),
-                        ),
-                    )
-                },
-            )
+            .when_some(self.input_error.clone(), |view, error| {
+                view.child(div().text_sm().text_color(rgb(0xf2ae87)).child(error))
+            })
+            .when_some(self.message.clone(), |view, message| {
+                view.child(div().text_sm().text_color(rgb(0xf2ae87)).child(message))
+            })
+    }
+}
+
+fn startup_config(loaded: Result<config::Config, String>) -> (config::Config, Option<String>) {
+    match loaded {
+        Ok(config) => (config, None),
+        // A broken file must not silently activate remapping or be overwritten.
+        Err(error) => (
+            config::Config {
+                remapping_enabled: false,
+                ..config::Config::default()
+            },
+            Some(error),
+        ),
     }
 }
 
@@ -246,12 +253,7 @@ pub fn run(input: Arc<Context>) {
         .as_ref()
         .map_err(Clone::clone)
         .and_then(|path| config::load_or_create(path, mac::remapping_enabled()));
-    let message = loaded.as_ref().err().cloned();
-    // A broken file must not silently activate remapping or be overwritten.
-    let config = loaded.unwrap_or(config::Config {
-        remapping_enabled: false,
-        ..config::Config::default()
-    });
+    let (config, message) = startup_config(loaded);
     Application::new().run(move |cx: &mut App| {
         let needs_restart = !mac::permissions().ready();
         let input_error = if needs_restart {
@@ -293,4 +295,60 @@ pub fn run(input: Arc<Context>) {
         mac::install_status_menu(running);
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn failed_save_and_reload_preserve_active_settings_and_startup_is_safe() {
+        let dir =
+            std::env::temp_dir().join(format!("caps-tap-settings-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let active = config::Config {
+            remapping_enabled: true,
+            escape_timeout_ms: 500,
+        };
+        config::save(&path, &active).unwrap();
+        let input = Arc::new(Context::default());
+        input.apply_config(&active);
+        let mut settings = Settings {
+            input: input.clone(),
+            input_error: None,
+            needs_restart: false,
+            message: None,
+            config: active.clone(),
+            config_path: Ok(path.clone()),
+        };
+        let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        fs::write(&temp, "another write").unwrap();
+        let updated = config::Config {
+            remapping_enabled: false,
+            escape_timeout_ms: 300,
+        };
+        assert!(settings.save(updated.clone()).is_err());
+        assert_eq!(settings.config, active);
+        assert_eq!(config::load(&path).unwrap(), active);
+        assert!(input.enabled.load(Ordering::Acquire));
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 500);
+        fs::remove_file(temp).unwrap();
+        fs::write(&path, "invalid JSON").unwrap();
+        assert!(settings.reload().is_err());
+        assert_eq!(settings.config, active);
+        assert!(input.enabled.load(Ordering::Acquire));
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 500);
+        let (startup, error) = startup_config(config::load_or_create(&path, true));
+        assert!(!startup.remapping_enabled);
+        assert!(error.is_some());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "invalid JSON");
+        config::save(&path, &updated).unwrap();
+        settings.reload().unwrap();
+        assert_eq!(settings.config, updated);
+        assert!(!input.enabled.load(Ordering::Acquire));
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 300);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
