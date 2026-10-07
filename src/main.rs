@@ -304,12 +304,16 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
 }
 
 fn cancels_escape(kind: u32, key: i64, synthetic: bool) -> bool {
-    !synthetic
-        && !(kind == FLAGS_CHANGED && key == CAPS)
-        && matches!(
-            kind,
-            KEY_DOWN | FLAGS_CHANGED | LEFT_MOUSE_DOWN | RIGHT_MOUSE_DOWN | OTHER_MOUSE_DOWN
-        )
+    if synthetic {
+        return false;
+    }
+    match kind {
+        // Only physical modifier keycodes identify a chord. State-only flags
+        // notifications (255 in the live Caps trace) are not another key press.
+        FLAGS_CHANGED => matches!(key, 54..=56 | 58..=63),
+        KEY_DOWN | LEFT_MOUSE_DOWN | RIGHT_MOUSE_DOWN | OTHER_MOUSE_DOWN => true,
+        _ => false,
+    }
 }
 
 fn remapped_flags(flags: u64, control_pressed: bool) -> u64 {
@@ -540,6 +544,22 @@ mod tests {
     }
 
     #[test]
+    fn modifier_state_notification_does_not_cancel_an_alone_tap() {
+        let mut state = State::default();
+        state.press(Duration::ZERO, Duration::from_millis(400));
+        if cancels_escape(FLAGS_CHANGED, 255, false) {
+            state.chord();
+        }
+        assert_eq!(
+            state.release(Duration::from_millis(317)),
+            vec![Action::ControlUp, Action::Escape]
+        );
+        for key in [54, 55, 56, 58, 59, 60, 61, 62, 63] {
+            assert!(cancels_escape(FLAGS_CHANGED, key, false));
+        }
+    }
+
+    #[test]
     fn chord_policy_ignores_key_up_caps_transitions_and_synthetic_input() {
         for kind in [
             KEY_DOWN,
@@ -548,8 +568,8 @@ mod tests {
             RIGHT_MOUSE_DOWN,
             OTHER_MOUSE_DOWN,
         ] {
-            assert!(cancels_escape(kind, 0, false));
-            assert!(!cancels_escape(kind, 0, true));
+            assert!(cancels_escape(kind, 56, false));
+            assert!(!cancels_escape(kind, 56, true));
         }
         assert!(!cancels_escape(KEY_UP, 0, false));
         assert!(!cancels_escape(FLAGS_CHANGED, CAPS, false));
