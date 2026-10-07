@@ -31,6 +31,26 @@ unsafe extern "C" {
 
 unsafe extern "C" {
     static mach_task_self_: u32;
+    fn mach_timebase_info(info: *mut Timebase) -> i32;
+}
+
+#[repr(C)]
+struct Timebase {
+    numer: u32,
+    denom: u32,
+}
+
+pub fn hid_timestamp(ticks: u64) -> std::time::Duration {
+    static TIMEBASE: OnceLock<Timebase> = OnceLock::new();
+    let info = TIMEBASE.get_or_init(|| {
+        let mut info = Timebase { numer: 0, denom: 0 };
+        let result = unsafe { mach_timebase_info(&mut info) };
+        assert!(result == 0 && info.denom != 0, "mach timebase unavailable");
+        info
+    });
+    let nanos =
+        (ticks as u128 * info.numer as u128 / info.denom as u128).min(u64::MAX as u128) as u64;
+    std::time::Duration::from_nanos(nanos)
 }
 
 // A parameter connection, not an exclusive keyboard grab. macOS owns the lock

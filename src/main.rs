@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 mod mac;
 mod settings;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const CAPS: i64 = 57;
 const CONTROL: u16 = 59;
@@ -91,6 +91,7 @@ unsafe extern "C" {
     fn IOHIDManagerOpen(manager: Ref, options: u32) -> i32;
     fn IOHIDValueGetElement(value: Ref) -> Ref;
     fn IOHIDValueGetIntegerValue(value: Ref) -> isize;
+    fn IOHIDValueGetTimeStamp(value: Ref) -> u64;
     fn IOHIDElementGetUsagePage(element: Ref) -> u32;
     fn IOHIDElementGetUsage(element: Ref) -> u32;
 }
@@ -105,7 +106,7 @@ struct Context {
 
 #[derive(Default)]
 struct State {
-    pressed_at: Option<Instant>,
+    pressed_at: Option<Duration>,
     chorded: bool,
 }
 
@@ -117,7 +118,7 @@ enum Action {
 }
 
 impl State {
-    fn press(&mut self, now: Instant) -> Option<Action> {
+    fn press(&mut self, now: Duration) -> Option<Action> {
         if self.pressed_at.is_some() {
             return None;
         }
@@ -132,11 +133,26 @@ impl State {
         }
     }
 
-    fn release(&mut self, now: Instant) -> Vec<Action> {
+    fn release(&mut self, now: Duration, timeout: Duration) -> Vec<Action> {
         let Some(started) = self.pressed_at.take() else {
             return vec![];
         };
-        let alone = !self.chorded && now.saturating_duration_since(started) < ALONE_TIMEOUT;
+        let duration = now.saturating_sub(started);
+        let alone = !self.chorded && duration < timeout;
+        if debug() {
+            eprintln!(
+                "[caps-tap] release: {} ms, decision={} (limit={} ms)",
+                duration.as_millis(),
+                if self.chorded {
+                    "chord"
+                } else if alone {
+                    "escape"
+                } else {
+                    "hold"
+                },
+                timeout.as_millis()
+            );
+        }
         self.chorded = false;
         let mut actions = vec![Action::ControlUp];
         if alone {
@@ -167,6 +183,7 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
         return;
     }
     let down = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
+    let timestamp = mac::hid_timestamp(unsafe { IOHIDValueGetTimeStamp(value) });
     if debug() {
         eprintln!(
             "[caps-tap] physical Caps {}",
@@ -175,14 +192,14 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
     }
     let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
     if down {
-        if let Some(action) = state.press(Instant::now()) {
+        if let Some(action) = state.press(timestamp) {
             unsafe {
                 emit(action, None);
             }
         }
     } else {
         context.clear_caps_lock();
-        for action in state.release(Instant::now()) {
+        for action in state.release(timestamp, ALONE_TIMEOUT) {
             unsafe {
                 emit(action, None);
             }
@@ -263,6 +280,9 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
         if state.pressed_at.is_some() {
             // Key-up itself is not a new chord; key-down and modifier changes are.
             if kind != KEY_UP {
+                if debug() && !state.chorded {
+                    eprintln!("[caps-tap] chord: event_type={kind}, keycode={key}");
+                }
                 state.chord();
             }
             unsafe {
@@ -421,42 +441,60 @@ mod tests {
 
     #[test]
     fn quick_tap_is_control_then_escape() {
-        let now = Instant::now();
+        let now = Duration::ZERO;
         let mut s = State::default();
         assert_eq!(s.press(now), Some(Action::ControlDown));
         assert_eq!(
-            s.release(now + Duration::from_millis(100)),
+            s.release(now + Duration::from_millis(100), ALONE_TIMEOUT),
             vec![Action::ControlUp, Action::Escape]
         );
-        assert!(s.release(now).is_empty());
+        assert!(s.release(now, ALONE_TIMEOUT).is_empty());
     }
 
     #[test]
     fn hold_releases_control_without_escape() {
-        let now = Instant::now();
+        let now = Duration::ZERO;
         let mut s = State::default();
         assert_eq!(s.press(now), Some(Action::ControlDown));
         assert_eq!(
-            s.release(now + Duration::from_millis(300)),
+            s.release(now + Duration::from_millis(300), ALONE_TIMEOUT),
             vec![Action::ControlUp]
         );
     }
 
     #[test]
     fn chord_releases_control_without_escape() {
-        let now = Instant::now();
+        let now = Duration::ZERO;
         let mut s = State::default();
         s.press(now);
         s.chord();
         assert_eq!(
-            s.release(now + Duration::from_millis(10)),
+            s.release(now + Duration::from_millis(10), ALONE_TIMEOUT),
+            vec![Action::ControlUp]
+        );
+    }
+
+    #[test]
+    fn event_duration_decides_escape_even_when_callbacks_are_delayed() {
+        // Delivery time is deliberately not part of the state API: a queued
+        // 299 ms press remains a tap, but exactly 300 ms is a cancelled hold.
+        let pressed = Duration::from_secs(10);
+        let mut s = State::default();
+        s.press(pressed);
+        assert_eq!(
+            s.release(pressed + Duration::from_millis(299), ALONE_TIMEOUT),
+            vec![Action::ControlUp, Action::Escape]
+        );
+        s.press(pressed);
+        assert_eq!(
+            s.release(pressed + ALONE_TIMEOUT, ALONE_TIMEOUT),
             vec![Action::ControlUp]
         );
     }
 
     #[test]
     fn repeated_down_and_cancel_do_not_stick() {
-        let now = Instant::now();
+        let now = Duration::ZERO;
         let mut s = State::default();
         s.press(now);
         assert_eq!(s.press(now), None);
