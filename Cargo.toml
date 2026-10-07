@@ -1,0 +1,9 @@
+[package]
+name = "caps-tap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cocoa = "0.26.0"
+gpui = "0.2.2"
+objc = "0.2.7"

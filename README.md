@@ -1,0 +1,14 @@
+# Caps Tap
+
+Experimental macOS Caps Lock remapper with a GPUI settings window. Caps acts as Control immediately; if released alone within 300 ms, Escape is sent. A chord or longer hold sends no Escape, matching Andreas's Karabiner rule.
+
+## Build and try
+
+1. Quit Karabiner-Elements completely; it grabs the keyboard even when its Caps rule is disabled.
+2. Create and trust a local **Code Signing** identity named `Caps Tap Local` in Keychain Access (`security find-identity -v -p codesigning` must list it). Run `scripts/build-app` to build and sign the bundle (or set `CAPS_TAP_SIGNING_IDENTITY` to a different valid identity). Then move `dist/Caps Tap.app` to a **stable location** (such as `/Applications`) before using Launch at Login. Open the `.app` from there. `cargo run` works for UI testing, but cannot enable Launch at Login.
+3. Until both permissions are granted, the GPUI settings window lists **Input Monitoring** and **Accessibility** instead of the two main toggles. Once they're usable after relaunch, the permissions section disappears. Caps Tap does not auto-prompt: click each missing permission to open its System Settings pane, grant Caps Tap there, then quit and reopen Caps Tap. macOS may not apply Input Monitoring until relaunch, so there is no in-process Refresh button. If an older build is still listed, remove its old grant before enabling the rebuilt app. The window reports startup errors rather than pretending remapping is active.
+4. Toggle **Enable remapping** (stored in macOS app preferences) or **Launch at login** (macOS Login Items). macOS may require approval in System Settings → General → Login Items. The `Caps` menu-bar item shows running status, Open Settings, and Quit. Settings has a Dock icon while open. Closing it hides the window and Dock icon while remapping stays active; Open Settings in the menu bar brings both back.
+
+`scripts/build-app` signs the finished bundle with the same local certificate on every build. `codesign -d -r- 'dist/Caps Tap.app'` should show `identifier "dev.andreasdeleuran.capstap" and certificate leaf = …`, **not** `cdhash`. The switch from the old ad-hoc signature may require one new grant; permission survival after a changed-binary rebuild still needs a live test. Do not commit or export the certificate's private key. Builds and tests do **not** verify macOS input delivery, menu-bar behavior, or login-item registration. No login item is registered by building the app. Run `CAPS_TAP_DEBUG=1 'path/to/Caps Tap.app/Contents/MacOS/caps-tap'` to log only physical Caps up/down and processed Caps events.
+
+This is still a spike: login screen, secure input, sleep/wake, physical Caps Lock state/LED, tap interruptions, and stuck modifiers need real-device testing. A disabled event tap is re-enabled and a synthetic Control release is attempted, but lost input cannot be recovered. It cannot reliably coexist with a remapper that has exclusive access to the same keyboard.
