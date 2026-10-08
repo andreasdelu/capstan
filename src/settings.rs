@@ -812,6 +812,8 @@ pub fn check_ui() {
     app.update_window(handle, |_, window, cx| {
         let editor = view.read(cx).timeout_input.clone().unwrap();
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
+        let pending_success = view.read(cx).feedback_generation;
+        assert!(matches!(view.read(cx).message, Some(Feedback::Success(_))));
         let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         fs::write(&temp, "other writer").unwrap();
         editor.update(cx, |editor, cx| editor.set_value("750", window, cx));
@@ -824,6 +826,14 @@ pub fn check_ui() {
         );
         assert_eq!(config::load(&path).unwrap().escape_timeout_ms, 650);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
+        view.update(cx, |view, cx| {
+            view.expire_success(pending_success);
+            cx.notify();
+        });
+        assert!(
+            matches!(view.read(cx).message, Some(Feedback::Error(_))),
+            "The prior save timer cannot hide a failed save"
+        );
         fs::remove_file(temp).unwrap();
         editor.update(cx, |editor, cx| editor.set_value("20", window, cx));
         window.render_frame(cx);
@@ -862,6 +872,18 @@ pub fn check_ui() {
         window.click("reload-settings", cx);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
         assert_eq!(editor.read(cx).value(), "400");
+        let first_reload = view.read(cx).feedback_generation;
+        window.click("reload-settings", cx);
+        view.update(cx, |view, cx| {
+            view.expire_success(first_reload);
+            cx.notify();
+        });
+        assert!(
+            matches!(view.read(cx).message, Some(Feedback::Success(_))),
+            "The earlier reload timer cannot clear the later success"
+        );
+        window.render_frame(cx);
+        assert!(window.find("settings-message").visible());
         window.click("0-1", cx);
         assert_eq!(window.find("tap-key").value(), Some("Escape"));
         assert_eq!(window.find("hold-modifier").value(), Some("Control"));
@@ -1005,10 +1027,8 @@ pub fn check_ui() {
             cx,
         );
         let viewport = window.find("settings-scroll").bounds();
-        for id in ["input-error"] {
-            let alert = window.find(id).bounds();
-            assert!(alert.origin.y < viewport.bottom() && alert.bottom() > viewport.origin.y);
-        }
+        let alert = window.find("input-error").bounds();
+        assert!(alert.origin.y < viewport.bottom() && alert.bottom() > viewport.origin.y);
     })
     .unwrap();
     app.capture_screenshot(handle)
@@ -1018,6 +1038,7 @@ pub fn check_ui() {
     app.update_window(handle, |_, window, cx| {
         view.update(cx, |view, cx| {
             view.input = input.clone();
+            view.input_error = None;
             cx.notify();
         });
         window.scroll(
@@ -1035,7 +1056,10 @@ pub fn check_ui() {
     assert_eq!(viewer_handle.unwrap(), viewer, "reuse the existing viewer");
     app.update_window(viewer, |_, window, cx| {
         window.render_frame(cx);
+        assert_eq!(window.find("viewer-record").label(), Some("Record"));
+        assert!(window.find("viewer-empty").visible());
         window.click("viewer-record", cx);
+        assert_eq!(window.find("viewer-record").label(), Some("Stop"));
         assert!(input.state.lock().unwrap().diagnostics.recording);
         {
             let mut state = input.state.lock().unwrap();
@@ -1095,6 +1119,21 @@ pub fn check_ui() {
         assert_eq!(gestures[2].result, "Hold");
         assert_eq!(gestures[3].result, "Cancelled");
         assert!(window.try_find("viewer-raw").is_none());
+        assert!(window.try_find("viewer-details-title").is_none());
+        assert!(window.try_find("viewer-cutoff-active").is_none());
+        assert_eq!(window.find("viewer-record").label(), Some("Record"));
+        for (ix, label) in [
+            "Cancelled · — · Control",
+            "Hold · 800 ms · Control",
+            "Hold (chord) · 90 ms · Control",
+            "Tap · 100 ms · Escape (failed)",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(window.find(("gesture", ix)).visible());
+            assert_eq!(window.find(("gesture", ix)).label(), Some(label));
+        }
         drop(state);
     })
     .unwrap();
@@ -1103,18 +1142,13 @@ pub fn check_ui() {
         .save("dist/qa/event-viewer.png")
         .unwrap();
     app.update_window(viewer, |_, window, cx| {
-        window.click("viewer-details-title", cx);
-        assert!(window.find("viewer-raw").bounds().size.height > px(0.));
-        window.scroll(
-            "viewer-events",
-            ScrollDelta::Pixels(point(px(0.), px(-600.))),
-            cx,
-        );
+        Theme::change(ThemeMode::Dark, Some(window), cx);
+        window.render_frame(cx);
     })
     .unwrap();
     app.capture_screenshot(viewer)
         .unwrap()
-        .save("dist/qa/event-viewer-details.png")
+        .save("dist/qa/event-viewer-dark.png")
         .unwrap();
     app.update_window(viewer, |_, window, cx| {
         window.scroll(
@@ -1122,15 +1156,73 @@ pub fn check_ui() {
             ScrollDelta::Pixels(point(px(0.), px(600.))),
             cx,
         );
-        window.click("viewer-details-title", cx);
-        assert!(window.try_find("viewer-raw").is_none());
         window.click("viewer-clear", cx);
+        assert!(!input.state.lock().unwrap().diagnostics.recording);
         assert!(input.state.lock().unwrap().diagnostics.rows.is_empty());
         assert!(
             input.enabled.load(Ordering::Acquire),
             "viewer controls must not disable input"
         );
         window.click("viewer-record", cx);
+        window.click("viewer-clear", cx);
+        assert!(
+            input.state.lock().unwrap().diagnostics.recording,
+            "Clear retains recording state"
+        );
+        {
+            let mut state = input.state.lock().unwrap();
+            state.press(
+                std::time::Duration::from_secs(46620),
+                std::time::Duration::from_millis(300),
+            );
+        }
+        window.render_frame(cx);
+        assert_eq!(window.find("viewer-record").label(), Some("Stop"));
+        assert_eq!(
+            window.find(("gesture", 0_usize)).label(),
+            Some("Holding… · — · Control")
+        );
+    })
+    .unwrap();
+    app.capture_screenshot(viewer)
+        .unwrap()
+        .save("dist/qa/event-viewer-recording-dark.png")
+        .unwrap();
+    app.update_window(viewer, |_, window, cx| {
+        Theme::change(ThemeMode::Light, Some(window), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    app.capture_screenshot(viewer)
+        .unwrap()
+        .save("dist/qa/event-viewer-recording.png")
+        .unwrap();
+    app.update_window(viewer, |_, window, cx| {
+        {
+            let mut state = input.state.lock().unwrap();
+            state.release(std::time::Duration::from_secs(46621));
+            for index in 0..120 {
+                let start = std::time::Duration::from_secs(46630 + index);
+                state.press(start, std::time::Duration::from_millis(300));
+                state.release(start + std::time::Duration::from_millis(100));
+            }
+            assert_eq!(state.diagnostics.rows.len(), super::diagnostics::CAPACITY);
+        }
+        window.render_frame(cx);
+        let last = input.state.lock().unwrap().diagnostics.gestures().len() - 1;
+        assert!(window.find(("gesture", 0_usize)).visible());
+        let viewport = window.find("viewer-events").bounds();
+        assert!(window.find(("gesture", last)).bounds().origin.y > viewport.bottom());
+        window.scroll(
+            "viewer-events",
+            ScrollDelta::Pixels(point(px(0.), px(-10000.))),
+            cx,
+        );
+        let oldest = window.find(("gesture", last)).bounds();
+        assert!(
+            oldest.origin.y < viewport.bottom() && oldest.bottom() > viewport.origin.y,
+            "Oldest retained row is reachable"
+        );
         window.remove_window();
     })
     .unwrap();
@@ -1143,14 +1235,9 @@ pub fn check_ui() {
     app.update_window(blocked_viewer.unwrap(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("viewer-cutoff-active").is_none());
-        assert!(
-            window
-                .find("viewer-cutoff-unavailable")
-                .bounds()
-                .size
-                .height
-                > px(0.)
-        );
+        assert!(window.try_find("viewer-cutoff-unavailable").is_none());
+        assert!(window.find("viewer-explainer").visible());
+        assert_eq!(window.find("viewer-record").label(), Some("Record"));
         window.remove_window();
     })
     .unwrap();

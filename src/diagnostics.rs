@@ -34,45 +34,12 @@ pub enum Decision {
 
 #[derive(Clone, Debug)]
 pub struct Row {
+    // Retained as capture evidence, never compared across HID/callback clocks.
+    #[allow(dead_code)]
     pub timestamp: Duration,
     pub event: Event,
     // Recording boundaries prevent a paused/clipped sequence from being paired.
     pub segment: u64,
-}
-
-impl Row {
-    pub fn label(&self) -> String {
-        match &self.event {
-            Event::PhysicalDown {
-                timeout_ms,
-                tap,
-                modifier,
-            } => format!(
-                "Caps down · tap {} / held {} · timeout {timeout_ms} ms",
-                tap.label(),
-                modifier.label()
-            ),
-            Event::PhysicalUp {
-                elapsed_ms,
-                timeout_ms,
-                decision,
-            } => format!(
-                "Caps up · {elapsed_ms} ms · {} · timeout {timeout_ms} ms",
-                match decision {
-                    Decision::Tap => "tap",
-                    Decision::Chord => "chord",
-                    Decision::Hold => "long hold",
-                }
-            ),
-            Event::Chord => "Chord (other input omitted)".into(),
-            Event::CapsSuppressed => "Processed Caps transition suppressed".into(),
-            Event::Cancelled => "Gesture cancelled · modifier release attempted".into(),
-            Event::Generated(action) => format!("GENERATED · {}", action_label(action)),
-            Event::GenerationFailed(action) => {
-                format!("GENERATION FAILED · {}", action_label(action))
-            }
-        }
-    }
 }
 
 pub fn action_label(action: &Action) -> String {
@@ -93,6 +60,8 @@ pub struct Gesture {
     pub output: Vec<String>,
     pub ended: bool,
     pub incomplete: bool,
+    pub active: bool,
+    pub generation_failed: bool,
 }
 
 impl Gesture {
@@ -104,31 +73,44 @@ impl Gesture {
             output: vec![],
             ended: false,
             incomplete: true,
+            active: false,
+            generation_failed: false,
         }
     }
     pub fn label(&self) -> String {
+        if self.mapping.is_none() || (self.incomplete && !self.active) {
+            return if self.generation_failed {
+                "Partial capture (failed)"
+            } else {
+                "Partial capture"
+            }
+            .into();
+        }
+        let (tap, held, _) = self.mapping.unwrap();
+        let result = if self.active {
+            "Holding…"
+        } else if self.result == "Chord" {
+            "Hold (chord)"
+        } else {
+            self.result
+        };
+        let key = if self.result == "Tap" {
+            tap.label()
+        } else {
+            held.label()
+        };
         let duration = self
             .elapsed_ms
             .map(|ms| format!("{ms} ms"))
-            .unwrap_or_else(|| "duration unavailable".into());
-        let mapping = self
-            .mapping
-            .map(|(tap, held, timeout)| {
-                format!(
-                    "tap {} / held {} · cutoff {timeout} ms",
-                    tap.label(),
-                    held.label()
-                )
-            })
-            .unwrap_or_else(|| "mapping unavailable".into());
-        let output = if self.incomplete || self.mapping.is_none() {
-            "details unavailable (partial capture)".into()
-        } else if self.output.is_empty() {
-            "output details unavailable".into()
-        } else {
-            self.output.join(", ")
-        };
-        format!("{} · {duration} · {mapping} · {output}", self.result)
+            .unwrap_or_else(|| "—".into());
+        format!(
+            "{result} · {duration} · {key}{}",
+            if self.generation_failed {
+                " (failed)"
+            } else {
+                ""
+            }
+        )
     }
 }
 
@@ -165,6 +147,8 @@ pub fn gestures(rows: &[Row]) -> Vec<Gesture> {
                     output: vec![],
                     ended: false,
                     incomplete: false,
+                    active: false,
+                    generation_failed: false,
                 });
             }
             Event::PhysicalUp {
@@ -200,6 +184,7 @@ pub fn gestures(rows: &[Row]) -> Vec<Gesture> {
             }
             Event::Generated(action) | Event::GenerationFailed(action) => {
                 let gesture = current.get_or_insert_with(Gesture::partial);
+                gesture.generation_failed |= matches!(row.event, Event::GenerationFailed(_));
                 // Don't attribute an evicted or mid-recording output to a guessed press.
                 if gesture.mapping.is_some() {
                     gesture.output.push(format!(
@@ -219,6 +204,7 @@ pub fn gestures(rows: &[Row]) -> Vec<Gesture> {
     if let Some(mut gesture) = current {
         if !gesture.ended {
             gesture.incomplete = true;
+            gesture.active = gesture.mapping.is_some();
         }
         gestures.push(gesture);
     }
@@ -233,6 +219,18 @@ pub struct Diagnostics {
 }
 
 impl Diagnostics {
+    pub fn gestures(&self) -> Vec<Gesture> {
+        let mut projected = gestures(&self.rows.iter().cloned().collect::<Vec<_>>());
+        if let Some(last) = projected.last_mut() {
+            last.active &= self.recording
+                && self
+                    .rows
+                    .back()
+                    .is_some_and(|row| row.segment == self.segment);
+        }
+        projected
+    }
+
     pub fn set_recording(&mut self, recording: bool) {
         if self.recording != recording {
             self.segment = self.segment.wrapping_add(1);
@@ -328,10 +326,15 @@ mod tests {
             ["Tap", "Chord", "Hold", "Cancelled"]
         );
         assert_eq!(g[0].elapsed_ms, Some(100));
-        assert!(g[0].label().contains("Tab tap failed"));
-        assert!(g[0].label().contains("cutoff 300 ms"));
-        assert!(g[3].label().contains("cutoff 500 ms"));
-        assert!(!g[3].label().contains("GENERATED"));
+        assert_eq!(g[0].label(), "Tap · 100 ms · Tab (failed)");
+        assert_eq!(g[1].label(), "Hold (chord) · 80 ms · Shift");
+        assert_eq!(g[2].label(), "Hold · 900 ms · Shift");
+        assert_eq!(g[3].label(), "Cancelled · — · Control");
+        assert_eq!(g[0].mapping, Some((TapKey::Tab, HoldModifier::Shift, 300)));
+        assert_eq!(
+            g[3].mapping,
+            Some((TapKey::Escape, HoldModifier::Control, 500))
+        );
     }
     #[test]
     fn actual_state_snapshot_repeated_presses_and_recording_mid_hold() {
@@ -339,6 +342,8 @@ mod tests {
         state.diagnostics.set_recording(true);
         let start = Duration::from_secs(10);
         state.press(start, Duration::from_millis(300));
+        let pending = gestures(&state.diagnostics.rows.iter().cloned().collect::<Vec<_>>());
+        assert_eq!(pending[0].label(), "Holding… · — · Control");
         assert!(state.press(start, Duration::from_millis(300)).is_none());
         let changed = super::super::config::Config {
             tap_key: TapKey::Tab,
@@ -383,19 +388,28 @@ mod tests {
         add(&mut d, Event::Generated(Action::ControlDown));
         add(&mut d, up(90, 300, Decision::Tap));
         let snapshot = |d: &Diagnostics| gestures(&d.rows.iter().cloned().collect::<Vec<_>>());
-        assert!(snapshot(&d)[0].label().contains("details unavailable"));
+        assert_eq!(snapshot(&d)[0].label(), "Partial capture");
         assert!(snapshot(&d)[0].output.is_empty());
+        d.clear();
+        add(&mut d, Event::GenerationFailed(Action::ControlDown));
+        assert_eq!(
+            d.gestures()[0].label(),
+            "Partial capture (failed)",
+            "Clipped failures must remain visible without inventing a key"
+        );
         d.clear();
         add(&mut d, down(TapKey::Escape, HoldModifier::Control, 300));
         d.set_recording(false);
+        assert_eq!(d.gestures()[0].label(), "Partial capture");
         d.set_recording(true);
+        assert_eq!(
+            d.gestures()[0].label(),
+            "Partial capture",
+            "Resuming mid-hold cannot revive a stopped capture"
+        );
         add(&mut d, up(100, 300, Decision::Tap));
         assert_eq!(snapshot(&d).len(), 2);
-        assert!(
-            snapshot(&d)
-                .iter()
-                .all(|g| g.label().contains("details unavailable"))
-        );
+        assert!(snapshot(&d).iter().all(|g| g.label() == "Partial capture"));
         d.clear();
         add(&mut d, down(TapKey::Escape, HoldModifier::Control, 300));
         for _ in 0..CAPACITY {
@@ -403,7 +417,7 @@ mod tests {
         }
         add(&mut d, up(100, 300, Decision::Tap));
         assert_eq!(snapshot(&d).len(), 1);
-        assert!(snapshot(&d)[0].label().contains("mapping unavailable"));
+        assert_eq!(snapshot(&d)[0].label(), "Partial capture");
         d.clear();
         add(&mut d, down(TapKey::Escape, HoldModifier::Control, 300));
         add(&mut d, down(TapKey::Tab, HoldModifier::Shift, 500));
