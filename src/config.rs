@@ -188,8 +188,19 @@ mod tests {
             remapping_enabled: false,
             ..Config::default()
         };
-        save(&legacy, &old).unwrap();
+        let old_bytes = r#"{"remapping_enabled":false,"escape_timeout_ms":400}"#;
+        fs::write(&legacy, old_bytes).unwrap();
         assert_eq!(load_with_legacy(&path, Some(&legacy), true).unwrap(), old);
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), old_bytes);
+        fs::remove_file(&path).unwrap();
+        let hidden_bytes =
+            r#"{"remapping_enabled":false,"escape_timeout_ms":400,"show_menu_bar_icon":false}"#;
+        fs::write(&legacy, hidden_bytes).unwrap();
+        let hidden = load_with_legacy(&path, Some(&legacy), true).unwrap();
+        assert!(!hidden.show_menu_bar_icon);
+        assert_eq!(hidden.escape_timeout_ms, 400);
+        assert!(!hidden.remapping_enabled);
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), hidden_bytes);
         let newer = Config {
             escape_timeout_ms: 600,
             ..Config::default()

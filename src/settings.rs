@@ -444,6 +444,13 @@ pub fn check_ui() {
         window.render_frame(cx);
         assert_eq!(window.find("remapping").checked(), Some(true));
         assert!(window.find("apply-timeout").bounds().size.width > px(0.));
+        let viewport = window.find("settings-scroll").bounds();
+        let reload = window.find("reload-settings").bounds();
+        assert!(reload.origin.y >= viewport.origin.y);
+        assert!(
+            reload.bottom() <= viewport.bottom(),
+            "Reload must fit the normal compact window"
+        );
         assert_eq!(
             window.find("escape-timeout").label(),
             Some("Escape window in milliseconds")
@@ -564,7 +571,9 @@ pub fn check_ui() {
         window.render_frame(cx);
         // Kit does not report the switch's disabled property in this snapshot;
         // the real click below verifies that its controlled value cannot change.
-        assert!(window.find("input-permission").bounds().size.width > px(0.));
+        let permission = window.find("input-permission").bounds();
+        let viewport = window.find("settings-scroll").bounds();
+        assert!(permission.origin.y < viewport.bottom() && permission.bottom() > viewport.origin.y);
         window.click("remapping", cx);
         assert!(!view.read(cx).input.enabled.load(Ordering::Acquire));
     })
@@ -614,6 +623,11 @@ pub fn check_ui() {
             ScrollDelta::Pixels(point(px(0.), px(600.))),
             cx,
         );
+        let viewport = window.find("settings-scroll").bounds();
+        for id in ["input-error", "settings-message"] {
+            let alert = window.find(id).bounds();
+            assert!(alert.origin.y < viewport.bottom() && alert.bottom() > viewport.origin.y);
+        }
     })
     .unwrap();
     app.capture_screenshot(handle)
