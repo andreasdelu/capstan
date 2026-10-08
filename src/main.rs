@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod config;
+#[allow(dead_code)] // The next capability connects this bounded model to the viewer.
+mod diagnostics;
+use diagnostics::{Decision, Diagnostics, Event};
 mod mac;
 mod settings;
 use std::time::Duration;
@@ -37,11 +40,6 @@ const UTF8_ENCODING: u32 = 0x0800_0100;
 
 type Ref = *mut c_void;
 
-fn debug() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("CAPS_TAP_DEBUG").is_some())
-}
-
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn CGEventTapCreate(
@@ -56,6 +54,7 @@ unsafe extern "C" {
     fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
     fn CGEventSetIntegerValueField(event: Ref, field: u32, value: i64);
     fn CGEventGetFlags(event: Ref) -> u64;
+    fn CGEventGetTimestamp(event: Ref) -> u64;
     fn CGEventSetFlags(event: Ref, flags: u64);
     fn CGEventCreateKeyboardEvent(source: Ref, keycode: u16, down: bool) -> Ref;
     fn CGEventSetType(event: Ref, event_type: u32);
@@ -115,9 +114,10 @@ struct State {
     config: config::Config,
     tap_key: TapKey,
     hold_modifier: HoldModifier,
+    diagnostics: Diagnostics,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Tap(TapKey),
     ModifierDown(HoldModifier),
@@ -154,6 +154,14 @@ impl State {
         self.chorded = false;
         self.tap_key = self.config.tap_key;
         self.hold_modifier = self.config.hold_modifier;
+        self.diagnostics.record(
+            now,
+            Event::PhysicalDown {
+                timeout_ms: timeout.as_millis() as u64,
+                tap: self.tap_key,
+                modifier: self.hold_modifier,
+            },
+        );
         Some(Action::ModifierDown(self.hold_modifier))
     }
 
@@ -170,20 +178,20 @@ impl State {
         let duration = now.saturating_sub(started);
         let timeout = self.timeout;
         let alone = !self.chorded && duration < timeout;
-        if debug() {
-            eprintln!(
-                "[caps-tap] release: {} ms, decision={} (limit={} ms)",
-                duration.as_millis(),
-                if self.chorded {
-                    "chord"
+        self.diagnostics.record(
+            now,
+            Event::PhysicalUp {
+                elapsed_ms: duration.as_millis(),
+                timeout_ms: timeout.as_millis(),
+                decision: if self.chorded {
+                    Decision::Chord
                 } else if alone {
-                    "escape"
+                    Decision::Tap
                 } else {
-                    "hold"
+                    Decision::Hold
                 },
-                timeout.as_millis()
-            );
-        }
+            },
+        );
         self.chorded = false;
         let mut actions = vec![Action::ModifierUp(self.hold_modifier)];
         if alone {
@@ -214,12 +222,6 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
     let context = unsafe { &*(context as *const Context) };
     let down = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
     let timestamp = mac::hid_timestamp(unsafe { IOHIDValueGetTimeStamp(value) });
-    if debug() {
-        eprintln!(
-            "[caps-tap] physical Caps {}",
-            if down { "down" } else { "up" }
-        );
-    }
     let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
     if !state.config.remapping_enabled {
         return;
@@ -228,21 +230,39 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
         let timeout = Duration::from_millis(state.config.escape_timeout_ms);
         if let Some(action) = state.press(timestamp, timeout) {
             unsafe {
-                emit(action, None);
+                emit_recorded(&mut state, timestamp, action, None);
             }
         }
     } else {
         context.clear_caps_lock();
         for action in state.release(timestamp) {
             unsafe {
-                emit(action, None);
+                emit_recorded(&mut state, timestamp, action, None);
             }
         }
     }
 }
 
 // Synthetic HID events pass through our event tap again; tag and ignore them.
-unsafe fn emit(action: Action, proxy: Option<Ref>) {
+unsafe fn emit_recorded(
+    state: &mut State,
+    timestamp: Duration,
+    action: Action,
+    proxy: Option<Ref>,
+) {
+    let success = unsafe { emit(action, proxy) };
+    state.diagnostics.record(
+        timestamp,
+        if success {
+            Event::Generated(action)
+        } else {
+            Event::GenerationFailed(action)
+        },
+    );
+}
+
+unsafe fn emit(action: Action, proxy: Option<Ref>) -> bool {
+    let mut success = true;
     let tap = matches!(action, Action::Tap(_));
     let (key, flags, kind) = match action {
         Action::Tap(key) => (key.keycode(), 0, KEY_DOWN),
@@ -252,7 +272,7 @@ unsafe fn emit(action: Action, proxy: Option<Ref>) {
     for down in if tap { &[true, false][..] } else { &[true][..] } {
         let event = unsafe { CGEventCreateKeyboardEvent(ptr::null_mut(), key, *down) };
         if event.is_null() {
-            eprintln!("could not create keyboard event");
+            success = false;
             continue;
         }
         unsafe {
@@ -267,6 +287,7 @@ unsafe fn emit(action: Action, proxy: Option<Ref>) {
             CFRelease(event);
         }
     }
+    success
 }
 
 unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -> Ref {
@@ -275,8 +296,10 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
         eprintln!("event tap disabled ({kind}); restarting it (check for missed keys)");
         let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(action) = state.cancel() {
+            let timestamp = mac::monotonic_timestamp();
+            state.diagnostics.record(timestamp, Event::Cancelled);
             unsafe {
-                emit(action, None);
+                emit_recorded(&mut state, timestamp, action, None);
             }
         }
         unsafe {
@@ -293,9 +316,15 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
     let key = unsafe { CGEventGetIntegerValueField(event, KEYCODE_FIELD) };
     // macOS reports Caps state transitions, not physical key-up. HID callback owns the state.
     if kind == FLAGS_CHANGED && key == CAPS {
-        if debug() {
-            eprintln!("[caps-tap] filtered processed Caps event");
-        }
+        context
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .diagnostics
+            .record(
+                Duration::from_nanos(unsafe { CGEventGetTimestamp(event) }),
+                Event::CapsSuppressed,
+            );
         context.clear_caps_lock();
         return ptr::null_mut();
     }
@@ -311,8 +340,11 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
         if state.pressed_at.is_some() {
             // Key-up itself is not a new chord; key-down and modifier changes are.
             if cancels_escape(kind, key, false) {
-                if debug() && !state.chorded {
-                    eprintln!("[caps-tap] chord: event_type={kind}, keycode={key}");
+                if !state.chorded {
+                    state.diagnostics.record(
+                        Duration::from_nanos(unsafe { CGEventGetTimestamp(event) }),
+                        Event::Chord,
+                    );
                 }
                 state.chord();
             }
@@ -387,8 +419,10 @@ impl Context {
     fn apply_config(&self, config: &config::Config) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(action) = state.configure(config) {
+            let timestamp = mac::monotonic_timestamp();
+            state.diagnostics.record(timestamp, Event::Cancelled);
             unsafe {
-                emit(action, None);
+                emit_recorded(&mut state, timestamp, action, None);
             }
         }
         if config.remapping_enabled {
@@ -533,6 +567,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn diagnostics_follow_physical_timing_and_do_not_change_actions() {
+        let mut state = State::default();
+        state.diagnostics.recording = true;
+        state.press(Duration::from_secs(10), ALONE_TIMEOUT);
+        state.configure(&config::Config {
+            escape_timeout_ms: 1000,
+            ..config::Config::default()
+        });
+        assert_eq!(
+            state.release(Duration::from_millis(10317)),
+            vec![Action::ControlUp]
+        );
+        assert_eq!(
+            state.diagnostics.rows.back().unwrap().event,
+            Event::PhysicalUp {
+                elapsed_ms: 317,
+                timeout_ms: 300,
+                decision: Decision::Hold
+            }
+        );
+        state.diagnostics.recording = false;
+        let count = state.diagnostics.rows.len();
+        state.press(Duration::from_secs(11), ALONE_TIMEOUT);
+        assert_eq!(
+            state.release(Duration::from_millis(11100)),
+            vec![Action::ControlUp, Action::Escape]
+        );
+        assert_eq!(state.diagnostics.rows.len(), count);
     }
 
     #[test]

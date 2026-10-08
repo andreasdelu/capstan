@@ -50,12 +50,17 @@ unsafe extern "C" {
 unsafe extern "C" {
     static mach_task_self_: u32;
     fn mach_timebase_info(info: *mut Timebase) -> i32;
+    fn mach_absolute_time() -> u64;
 }
 
 #[repr(C)]
 struct Timebase {
     numer: u32,
     denom: u32,
+}
+
+pub fn monotonic_timestamp() -> std::time::Duration {
+    hid_timestamp(unsafe { mach_absolute_time() })
 }
 
 pub fn hid_timestamp(ticks: u64) -> std::time::Duration {
