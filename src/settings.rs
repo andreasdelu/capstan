@@ -178,7 +178,7 @@ impl Render for Settings {
             .child(div().flex().flex_col().gap_6().p_6()
                 .child(div().flex().justify_between().items_center()
                     .child(div().flex().flex_col().gap_1()
-                        .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Caps Tap"))
+                        .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Capstan"))
                         .child(div().text_sm().text_color(muted).child("One key. Two useful jobs.")))
                     .child(div().flex().items_center().gap_2().px_3().py_1().rounded_full().bg(status_color.opacity(0.1))
                         .child(div().size_2().rounded_full().bg(status_color))
@@ -226,7 +226,7 @@ impl Render for Settings {
                         })))
                     .child(div().h_px().bg(border))
                     .child(div().flex().justify_between().items_center().gap_4().p_4()
-                        .child(setting_label("Launch at login", if bundled { "Keep Caps Tap available when you sign in." } else { "Open the bundled app to enable launch at login." }, cx))
+                        .child(setting_label("Launch at login", if bundled { "Keep Capstan available when you sign in." } else { "Open the bundled app to enable launch at login." }, cx))
                         .child(Switch::new("login").accessibility_label("Launch at login").checked(login).disabled(!bundled)
                             .on_change(cx.listener(|this, enabled, _, cx| {
                                 this.message = mac::set_login_enabled(*enabled).err().map(Feedback::Error);
@@ -245,8 +245,8 @@ impl Render for Settings {
                             }))))
                     .child(div().text_sm().text_color(muted).child("Edit the JSON, then reload. No restart or rebuild needed."))
                     .child(div().p_3().rounded_lg().bg(panel).border_1().border_color(border).text_xs().text_color(muted)
-                        .child("~/Library/Application Support/Caps Tap/settings.json")))
-                .child(div().text_xs().text_color(muted).child("Closing this window keeps Caps Tap in the menu bar.")))
+                        .child("~/Library/Application Support/Capstan/settings.json")))
+                .child(div().text_xs().text_color(muted).child("Closing this window keeps Capstan in the menu bar.")))
     }
 }
 
@@ -287,8 +287,8 @@ impl Settings {
     ) -> impl IntoElement {
         div().flex().flex_col().gap_3()
             .child(Alert::warning("permission-guidance", if permissions.ready() {
-                "Permissions granted. Quit and reopen Caps Tap to activate."
-            } else { "Grant the missing permissions in System Settings, then quit and reopen Caps Tap." }))
+                "Permissions granted. Quit and reopen Capstan to activate."
+            } else { "Grant the missing permissions in System Settings, then quit and reopen Capstan." }))
             .child(div().flex().gap_2()
                 .child(Button::new("input-permission").label(if permissions.input_monitoring { "Input Monitoring granted" } else { "Input Monitoring" })
                     .outline().icon(IconName::ExternalLink).disabled(permissions.input_monitoring)
@@ -350,7 +350,7 @@ pub fn run(input: Arc<Context>) {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(520.), px(560.))),
                     titlebar: Some(gpui_kit::TitlebarOptions {
-                        title: Some("Caps Tap".into()),
+                        title: Some("Capstan".into()),
                         ..Default::default()
                     }),
                     ..Default::default()

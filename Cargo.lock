@@ -798,7 +798,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "caps-tap"
+name = "capstan"
 version = "0.1.0"
 dependencies = [
  "cocoa 0.26.0",

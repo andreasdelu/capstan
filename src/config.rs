@@ -37,7 +37,7 @@ impl Config {
 
 pub fn path() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is unavailable; cannot locate settings")?;
-    Ok(PathBuf::from(home).join("Library/Application Support/Caps Tap/settings.json"))
+    Ok(PathBuf::from(home).join("Library/Application Support/Capstan/settings.json"))
 }
 
 pub fn load(path: &Path) -> Result<Config, String> {
@@ -47,18 +47,61 @@ pub fn load(path: &Path) -> Result<Config, String> {
 }
 
 pub fn load_or_create(path: &Path, legacy_enabled: bool) -> Result<Config, String> {
+    let legacy = path
+        .parent()
+        .and_then(Path::parent)
+        .map(|parent| parent.join("Caps Tap/settings.json"));
+    load_with_legacy(path, legacy.as_deref(), legacy_enabled)
+}
+
+fn load_with_legacy(
+    path: &Path,
+    legacy: Option<&Path>,
+    legacy_enabled: bool,
+) -> Result<Config, String> {
     match fs::read_to_string(path) {
         Ok(text) => Config::parse(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let config = Config {
-                remapping_enabled: legacy_enabled,
-                ..Config::default()
+            let config = match legacy.map(fs::read_to_string) {
+                Some(Ok(text)) => Config::parse(&text)?,
+                Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(format!("Could not read previous settings: {error}"));
+                }
+                _ => Config {
+                    remapping_enabled: legacy_enabled,
+                    ..Config::default()
+                },
             };
-            save(path, &config)?;
-            Ok(config)
+            create_settings(path, &config)?;
+            // Another process may have won the creation race. Read its settings,
+            // never replace them with the legacy file or defaults.
+            load(path)
         }
         Err(e) => Err(format!("Could not read {}: {e}", path.display())),
     }
+}
+
+fn create_settings(path: &Path, config: &Config) -> Result<(), String> {
+    use std::io::Write;
+    let parent = path.parent().ok_or("Settings path has no parent")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temp = path.with_extension(format!("json.{}.migration.tmp", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        writeln!(file, "{}", serde_json::to_string_pretty(config)?)?;
+        file.sync_all()?;
+        match fs::hard_link(&temp, path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+        }
+    })();
+    let _ = fs::remove_file(&temp);
+    result.map_err(|e: std::io::Error| format!("Could not create settings: {e}"))
 }
 
 pub fn save(path: &Path, config: &Config) -> Result<(), String> {
@@ -118,6 +161,34 @@ mod tests {
                 .escape_timeout_ms,
             500
         );
+    }
+
+    #[test]
+    fn rename_preserves_legacy_settings_and_never_overwrites_destination() {
+        let dir =
+            std::env::temp_dir().join(format!("capstan-migration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("old.json");
+        let path = dir.join("new.json");
+        let old = Config {
+            escape_timeout_ms: 400,
+            remapping_enabled: false,
+        };
+        save(&legacy, &old).unwrap();
+        assert_eq!(load_with_legacy(&path, Some(&legacy), true).unwrap(), old);
+        let newer = Config {
+            escape_timeout_ms: 600,
+            ..Config::default()
+        };
+        save(&path, &newer).unwrap();
+        create_settings(&path, &old).unwrap();
+        assert_eq!(load_with_legacy(&path, Some(&legacy), true).unwrap(), newer);
+        fs::remove_file(&path).unwrap();
+        fs::write(&legacy, "invalid JSON").unwrap();
+        assert!(load_with_legacy(&path, Some(&legacy), true).is_err());
+        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "invalid JSON");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

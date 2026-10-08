@@ -226,7 +226,7 @@ pub fn set_login_enabled(enabled: bool) -> Result<(), String> {
         }
     }
     if enabled && !login_enabled() {
-        return Err("Approve Caps Tap in System Settings → General → Login Items".into());
+        return Err("Approve Capstan in System Settings → General → Login Items".into());
     }
     Ok(())
 }
@@ -237,7 +237,7 @@ pub fn hide_settings() {
         let _: () = msg_send![app, hide: nil];
         let changed: BOOL = msg_send![app, setActivationPolicy: 1isize];
         if changed == NO {
-            eprintln!("Could not hide Caps Tap from the Dock");
+            eprintln!("Could not hide Capstan from the Dock");
         }
     }
 }
@@ -247,7 +247,7 @@ extern "C" fn open_settings(_target: &Object, _selector: Sel, _sender: id) {
         let app: id = msg_send![class!(NSApplication), sharedApplication];
         let changed: BOOL = msg_send![app, setActivationPolicy: 0isize];
         if changed == NO {
-            eprintln!("Could not show Caps Tap in the Dock");
+            eprintln!("Could not show Capstan in the Dock");
         }
         let _: () = msg_send![app, unhide: nil];
         let _: () = msg_send![app, activateIgnoringOtherApps: YES];
@@ -282,9 +282,9 @@ pub fn install_status_menu(running: bool) {
 
         let menu: id = msg_send![class!(NSMenu), new];
         let label = NSString::alloc(nil).init_str(if running {
-            "Caps Tap is running"
+            "Capstan is running"
         } else {
-            "Caps Tap: input unavailable"
+            "Capstan: input unavailable"
         });
         let empty = NSString::alloc(nil).init_str("");
         let running: id = msg_send![class!(NSMenuItem), alloc];
@@ -302,7 +302,7 @@ pub fn install_status_menu(running: bool) {
         let _: () = msg_send![open_item, setTarget: target];
         let _: () = msg_send![menu, addItem: open_item];
 
-        let quit = NSString::alloc(nil).init_str("Quit Caps Tap");
+        let quit = NSString::alloc(nil).init_str("Quit Capstan");
         let quit_item: id = msg_send![class!(NSMenuItem), alloc];
         let quit_item: id =
             msg_send![quit_item, initWithTitle: quit action: sel!(terminate:) keyEquivalent: empty];
