@@ -1,7 +1,24 @@
 #![allow(unexpected_cfgs)] // objc 0.2 macros check a legacy cargo-clippy cfg.
 
+use std::cell::Cell;
 use std::ffi::CStr;
 use std::sync::OnceLock;
+
+thread_local! {
+    static STATUS_ITEM: Cell<id> = const { Cell::new(nil) };
+}
+
+// AppKit objects are only accessed on the application's main thread.
+pub fn set_menu_bar_visible(visible: bool) {
+    STATUS_ITEM.with(|item| {
+        let item = item.get();
+        if !item.is_null() {
+            unsafe {
+                let _: () = msg_send![item, setVisible: if visible { YES } else { NO }];
+            }
+        }
+    });
+}
 
 use cocoa::base::{id, nil};
 use cocoa::foundation::NSString;
@@ -243,6 +260,10 @@ pub fn hide_settings() {
 }
 
 extern "C" fn open_settings(_target: &Object, _selector: Sel, _sender: id) {
+    show_settings();
+}
+
+pub fn show_settings() {
     unsafe {
         let app: id = msg_send![class!(NSApplication), sharedApplication];
         let changed: BOOL = msg_send![app, setActivationPolicy: 0isize];
@@ -250,6 +271,12 @@ extern "C" fn open_settings(_target: &Object, _selector: Sel, _sender: id) {
             eprintln!("Could not show Capstan in the Dock");
         }
         let _: () = msg_send![app, unhide: nil];
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for index in 0..count {
+            let window: id = msg_send![windows, objectAtIndex: index];
+            let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+        }
         let _: () = msg_send![app, activateIgnoringOtherApps: YES];
     }
 }
@@ -276,9 +303,21 @@ pub fn install_status_menu(running: bool) {
         let item: id = msg_send![bar, statusItemWithLength: -1.0f64];
         // Keep our own reference for the lifetime of the process.
         let _: id = msg_send![item, retain];
+        STATUS_ITEM.with(|slot| slot.set(item));
         let button: id = msg_send![item, button];
-        let title = NSString::alloc(nil).init_str("Caps");
-        let _: () = msg_send![button, setTitle: title];
+        let bytes = include_bytes!("../assets/MenuBarIcon.png");
+        let data: id = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr() length: bytes.len()];
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithData: data];
+        if !image.is_null() {
+            let _: () = msg_send![image, setSize: cocoa::foundation::NSSize::new(18., 18.)];
+            let _: () = msg_send![image, setTemplate: YES];
+            let _: () = msg_send![button, setImage: image];
+            let _: () = msg_send![image, release];
+        }
+        let label = NSString::alloc(nil).init_str("Capstan");
+        let _: () = msg_send![button, setToolTip: label];
+        let _: () = msg_send![button, setAccessibilityLabel: label];
 
         let menu: id = msg_send![class!(NSMenu), new];
         let label = NSString::alloc(nil).init_str(if running {

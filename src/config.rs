@@ -11,6 +11,7 @@ pub const MAX_TIMEOUT_MS: u64 = 2000;
 pub struct Config {
     pub remapping_enabled: bool,
     pub escape_timeout_ms: u64,
+    pub show_menu_bar_icon: bool,
 }
 
 impl Default for Config {
@@ -18,6 +19,7 @@ impl Default for Config {
         Self {
             remapping_enabled: true,
             escape_timeout_ms: 300,
+            show_menu_bar_icon: true,
         }
     }
 }
@@ -136,6 +138,16 @@ mod tests {
     #[test]
     fn validates_defaults_types_and_timeout_bounds() {
         assert_eq!(Config::parse("{}").unwrap(), Config::default());
+        assert!(
+            Config::parse(r#"{"escape_timeout_ms":400}"#)
+                .unwrap()
+                .show_menu_bar_icon
+        );
+        assert!(
+            !Config::parse(r#"{"show_menu_bar_icon":false}"#)
+                .unwrap()
+                .show_menu_bar_icon
+        );
         for text in [
             "{",
             r#"{"escape_timeout_ms":49}"#,
@@ -143,6 +155,7 @@ mod tests {
             r#"{"escape_timeout_ms":-1}"#,
             r#"{"escape_timeout_ms":"300"}"#,
             r#"{"remapping_enabled":"true"}"#,
+            r#"{"show_menu_bar_icon":"true"}"#,
             r#"{"escape_timeot_ms":500}"#,
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
@@ -173,6 +186,7 @@ mod tests {
         let old = Config {
             escape_timeout_ms: 400,
             remapping_enabled: false,
+            ..Config::default()
         };
         save(&legacy, &old).unwrap();
         assert_eq!(load_with_legacy(&path, Some(&legacy), true).unwrap(), old);

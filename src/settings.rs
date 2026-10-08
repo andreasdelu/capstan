@@ -120,6 +120,8 @@ impl Settings {
         if !self.needs_restart && self.input_error.is_none() {
             self.input.apply_config(&config);
         }
+        #[cfg(not(test))]
+        mac::set_menu_bar_visible(config.show_menu_bar_icon);
         self.config = config;
     }
 
@@ -246,7 +248,13 @@ impl Render for Settings {
                     .child(div().text_sm().text_color(muted).child("Edit the JSON, then reload. No restart or rebuild needed."))
                     .child(div().p_3().rounded_lg().bg(panel).border_1().border_color(border).text_xs().text_color(muted)
                         .child("~/Library/Application Support/Capstan/settings.json")))
-                .child(div().text_xs().text_color(muted).child("Closing this window keeps Capstan in the menu bar.")))
+                .child(div().flex().justify_between().items_center().gap_4()
+                    .child(setting_label("Show menu bar icon", "When hidden, open Capstan.app to return to settings.", cx))
+                    .child(Switch::new("show-menu-bar").accessibility_label("Show menu bar icon").checked(self.config.show_menu_bar_icon)
+                        .on_change(cx.listener(|this, enabled, _, cx| {
+                            this.message = this.save(config::Config { show_menu_bar_icon: *enabled, ..this.config.clone() }).err().map(Feedback::Error);
+                            cx.notify();
+                        })))))
     }
 }
 
@@ -326,65 +334,67 @@ pub fn run(input: Arc<Context>) {
         .map_err(Clone::clone)
         .and_then(|path| config::load_or_create(path, mac::remapping_enabled()));
     let (config, message) = startup_config(loaded);
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_kit::init(cx);
-            Theme::sync_system_appearance(None, cx);
-            let needs_restart = !mac::permissions().ready();
-            let input_error = if needs_restart {
-                None
-            } else {
-                start_input(&input).err()
-            };
-            if !needs_restart && input_error.is_none() {
-                input.apply_config(&config);
-            }
-            if let Some(error) = &input_error {
-                eprintln!("caps-tap: {error}");
-            }
-            let running = !needs_restart && input_error.is_none();
-            let bounds = Bounds::centered(None, size(px(560.), px(760.)), cx);
-            gpui_kit::open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(520.), px(560.))),
-                    titlebar: Some(gpui_kit::TitlebarOptions {
-                        title: Some("Capstan".into()),
-                        ..Default::default()
-                    }),
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    application.on_reopen(|_| mac::show_settings());
+    application.run(move |cx: &mut App| {
+        gpui_kit::init(cx);
+        Theme::sync_system_appearance(None, cx);
+        let needs_restart = !mac::permissions().ready();
+        let input_error = if needs_restart {
+            None
+        } else {
+            start_input(&input).err()
+        };
+        if !needs_restart && input_error.is_none() {
+            input.apply_config(&config);
+        }
+        if let Some(error) = &input_error {
+            eprintln!("caps-tap: {error}");
+        }
+        let running = !needs_restart && input_error.is_none();
+        let show_menu_bar_icon = config.show_menu_bar_icon;
+        let bounds = Bounds::centered(None, size(px(560.), px(760.)), cx);
+        gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(520.), px(560.))),
+                titlebar: Some(gpui_kit::TitlebarOptions {
+                    title: Some("Capstan".into()),
                     ..Default::default()
-                },
-                cx,
-                |window, cx| {
-                    // Hide rather than close: the menu bar reopens the window while the
-                    // HID listener keeps running.
-                    window.on_window_should_close(cx, |_, _| {
-                        mac::hide_settings();
-                        false
-                    });
-                    cx.new(|cx| {
-                        let mut settings = Settings {
-                            #[cfg(test)]
-                            system_facts: None,
-                            input,
-                            input_error,
-                            needs_restart,
-                            message: message.map(Feedback::Error),
-                            config,
-                            config_path,
-                            timeout_input: None,
-                            timeout_subscription: None,
-                        };
-                        settings.setup_timeout(window, cx);
-                        settings
-                    })
-                },
-            )
-            .expect("failed to open settings window");
-            mac::install_status_menu(running);
-            cx.activate(true);
-        });
+                }),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| {
+                // Hide rather than close: the menu bar reopens the window while the
+                // HID listener keeps running.
+                window.on_window_should_close(cx, |_, _| {
+                    mac::hide_settings();
+                    false
+                });
+                cx.new(|cx| {
+                    let mut settings = Settings {
+                        #[cfg(test)]
+                        system_facts: None,
+                        input,
+                        input_error,
+                        needs_restart,
+                        message: message.map(Feedback::Error),
+                        config,
+                        config_path,
+                        timeout_input: None,
+                        timeout_subscription: None,
+                    };
+                    settings.setup_timeout(window, cx);
+                    settings
+                })
+            },
+        )
+        .expect("failed to open settings window");
+        mac::install_status_menu(running);
+        mac::set_menu_bar_visible(show_menu_bar_icon);
+        cx.activate(true);
+    });
 }
 
 #[cfg(test)]
@@ -401,6 +411,7 @@ pub fn check_ui() {
     let active = config::Config {
         remapping_enabled: true,
         escape_timeout_ms: 400,
+        ..config::Config::default()
     };
     config::save(&path, &active).unwrap();
     let input = Arc::new(Context::default());
@@ -622,6 +633,7 @@ mod tests {
         let active = config::Config {
             remapping_enabled: true,
             escape_timeout_ms: 500,
+            ..config::Config::default()
         };
         config::save(&path, &active).unwrap();
         let input = Arc::new(Context::default());
@@ -642,6 +654,7 @@ mod tests {
         let updated = config::Config {
             remapping_enabled: false,
             escape_timeout_ms: 300,
+            ..config::Config::default()
         };
         assert!(settings.save(updated.clone()).is_err());
         assert_eq!(settings.config, active);
