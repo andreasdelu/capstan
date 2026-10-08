@@ -32,24 +32,24 @@
             "solid" : "display-p3:0.97169,1.00000,0.98189,1.00000"
           },
           "glass" : true,
-          "image-name" : "ChatGPT Image 7 Oct 2026, 16_17_00.png",
-          "name" : "ChatGPT Image 7 Oct 2026, 16_17_00",
+          "image-name" : "CapstanSilhouette.png",
+          "name" : "Capstan silhouette",
           "position" : {
-            "scale" : 0.73,
+            "scale" : 1.05,
             "translation-in-points" : [
-              42,
-              -16.789999999999964
+              0,
+              0
             ]
           }
         }
       ],
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 0.25
       },
       "translucency" : {
-        "enabled" : true,
-        "value" : 0.3
+        "enabled" : false,
+        "value" : 0.0
       }
     }
   ],
