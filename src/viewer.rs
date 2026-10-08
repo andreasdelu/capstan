@@ -1,18 +1,19 @@
-use super::Context;
+use super::{Context, diagnostics};
 use gpui_kit::component::{
     ActiveTheme, Sizable, TitleBar,
-    alert::Alert,
+    accordion::Accordion,
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Bounds, Context as ViewContext, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, Context as ViewContext, TestSupportExt, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use std::sync::Arc;
 use std::time::Duration;
 
 pub struct EventViewer {
     input: Arc<Context>,
+    details_open: bool,
 }
 
 impl Drop for EventViewer {
@@ -41,29 +42,36 @@ impl EventViewer {
             }
         })
         .detach();
-        Self { input }
+        Self {
+            input,
+            details_open: false,
+        }
     }
 }
 
 impl Render for EventViewer {
     fn render(&mut self, _: &mut Window, cx: &mut ViewContext<Self>) -> impl IntoElement {
-        let (recording, rows) = {
+        let (recording, rows, timeout) = {
             let state = self.input.state.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.diagnostics.recording,
                 state.diagnostics.rows.iter().cloned().collect::<Vec<_>>(),
+                state.config.escape_timeout_ms,
             )
         };
+        let gestures = diagnostics::gestures(&rows);
         let theme = cx.theme();
         div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground).font_family(theme.font_family.clone()).text_size(px(13.))
             .child(TitleBar::new().bg(theme.background).border_color(theme.border).child("Capstan Event Viewer"))
             .child(div().flex().flex_col().gap_3().p_4()
-                .child(Alert::info("viewer-privacy", "Caps only · 200 events in memory · no export. GENERATED is not proof of OS delivery."))
+                .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("Caps only · 200 events in memory · no export. Translations are not OS delivery proof."))
+                .child(div().child(format!("Current tap cutoff: {timeout} ms · Each press keeps its original cutoff.")))
                 .child(div().flex().items_center().gap_2()
                     .child(Button::new("viewer-record").small().label(if recording { "Pause" } else { "Record" }).primary()
                         .on_click(cx.listener(|this, _, _, cx| {
                             let mut state = this.input.state.lock().unwrap_or_else(|e| e.into_inner());
-                            state.diagnostics.recording = !state.diagnostics.recording;
+                            let recording = !state.diagnostics.recording;
+                            state.diagnostics.set_recording(recording);
                             cx.notify();
                         })))
                     .child(Button::new("viewer-clear").small().label("Clear").outline()
@@ -75,7 +83,12 @@ impl Render for EventViewer {
             .child(div().id("viewer-events").flex_1().min_h_0().overflow_y_scroll().px_4().pb_4()
                 .child(div().flex().flex_col().gap_2()
                     .when(rows.is_empty(), |view| view.child("Press Record, then try Caps Lock. Closing this window stops and clears capture."))
-                    .children(rows.iter().rev().map(|row| div().text_size(px(12.)).child(format!("{:.3} s · {}", row.timestamp.as_secs_f64(), row.label()))))))
+                    .children(gestures.iter().rev().enumerate().map(|(ix, gesture)| div().id(("gesture", ix)).test_support().text_size(px(12.)).py_2().border_b_1().border_color(theme.border).child(gesture.label())))
+                    .child(Accordion::new("viewer-details").small()
+                        .item(|item| item.open(self.details_open).title(div().id("viewer-details-title").test_support().child("Details"))
+                            .when(self.details_open, |item| item.child(div().id("viewer-raw").test_support().flex().flex_col().gap_2()
+                                .children(rows.iter().enumerate().map(|(ix, row)| div().text_size(px(11.)).child(format!("{} · raw source timestamp {:.3} s · {}", ix + 1, row.timestamp.as_secs_f64(), row.label())))))))
+                        .on_toggle_click(cx.listener(|this, indices: &[usize], _, cx| { this.details_open = !indices.is_empty(); cx.notify(); })))))
     }
 }
 

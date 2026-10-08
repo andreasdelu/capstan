@@ -880,16 +880,63 @@ pub fn check_ui() {
         assert!(input.state.lock().unwrap().diagnostics.recording);
         {
             let mut state = input.state.lock().unwrap();
-            state.press(
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_millis(300),
-            );
-            state.release(std::time::Duration::from_millis(10100));
+            use super::diagnostics::Event;
+            use std::time::Duration;
+            for (start, duration, chord) in [
+                (46610000, 100, false),
+                (46611000, 90, true),
+                (46612000, 800, false),
+            ] {
+                if let Some(action) =
+                    state.press(Duration::from_millis(start), Duration::from_millis(300))
+                {
+                    state
+                        .diagnostics
+                        .record(Duration::from_secs(1118), Event::Generated(action));
+                }
+                state
+                    .diagnostics
+                    .record(Duration::from_secs(1118), Event::CapsSuppressed);
+                if chord {
+                    state.chord();
+                    state
+                        .diagnostics
+                        .record(Duration::from_secs(1118), Event::Chord);
+                }
+                for action in state.release(Duration::from_millis(start + duration)) {
+                    state.diagnostics.record(
+                        Duration::from_secs(1118),
+                        if matches!(action, super::Action::Tap(_)) {
+                            Event::GenerationFailed(action)
+                        } else {
+                            Event::Generated(action)
+                        },
+                    );
+                }
+            }
+            state.press(Duration::from_secs(46614), Duration::from_millis(500));
+            if let Some(action) = state.cancel() {
+                state
+                    .diagnostics
+                    .record(Duration::from_secs(1118), Event::Cancelled);
+                state
+                    .diagnostics
+                    .record(Duration::from_secs(1118), Event::Generated(action));
+            }
         }
         window.render_frame(cx);
         window.click("viewer-record", cx);
         assert!(!input.state.lock().unwrap().diagnostics.recording);
-        assert_eq!(input.state.lock().unwrap().diagnostics.rows.len(), 2);
+        let state = input.state.lock().unwrap();
+        let rows = state.diagnostics.rows.iter().cloned().collect::<Vec<_>>();
+        let gestures = super::diagnostics::gestures(&rows);
+        assert_eq!(gestures.len(), 4);
+        assert_eq!(gestures[0].result, "Tap");
+        assert_eq!(gestures[1].result, "Chord");
+        assert_eq!(gestures[2].result, "Hold");
+        assert_eq!(gestures[3].result, "Cancelled");
+        assert!(window.try_find("viewer-raw").is_none());
+        drop(state);
     })
     .unwrap();
     app.capture_screenshot(viewer)
@@ -897,6 +944,17 @@ pub fn check_ui() {
         .save("dist/qa/event-viewer.png")
         .unwrap();
     app.update_window(viewer, |_, window, cx| {
+        window.click("viewer-details-title", cx);
+        assert!(window.find("viewer-raw").bounds().size.height > px(0.));
+    })
+    .unwrap();
+    app.capture_screenshot(viewer)
+        .unwrap()
+        .save("dist/qa/event-viewer-details.png")
+        .unwrap();
+    app.update_window(viewer, |_, window, cx| {
+        window.click("viewer-details-title", cx);
+        assert!(window.try_find("viewer-raw").is_none());
         window.click("viewer-clear", cx);
         assert!(input.state.lock().unwrap().diagnostics.rows.is_empty());
         assert!(
