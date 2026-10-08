@@ -57,6 +57,26 @@ fn main() {
             assert_eq!(viewer_visible, NO, "settings reopen must not resurrect the viewer");
 
         }
+        // An open viewer belongs to the current session, unlike the dismissed
+        // viewer above. Application hide/unhide must preserve it on recovery.
+        let _: () = msg_send![window, orderFront: nil];
+        let _: () = msg_send![viewer, orderFront: nil];
+        let settings_before: BOOL = msg_send![window, isVisible];
+        let viewer_before: BOOL = msg_send![viewer, isVisible];
+        assert_eq!(settings_before, YES);
+        assert_eq!(viewer_before, YES);
+        mac::hide_settings();
+        let hidden: isize = msg_send![app, activationPolicy];
+        assert_eq!(hidden, 1);
+        let handled: BOOL = msg_send![delegate, applicationShouldHandleReopen: app hasVisibleWindows: YES];
+        assert_eq!(handled, NO);
+        let policy: isize = msg_send![app, activationPolicy];
+        let settings_after: BOOL = msg_send![window, isVisible];
+        let viewer_after: BOOL = msg_send![viewer, isVisible];
+        assert_eq!(policy, 0);
+        assert_eq!(settings_after, YES, "reopen restores settings with an open viewer");
+        assert_eq!(viewer_after, YES, "reopen preserves the still-open viewer session");
+        let _: () = msg_send![viewer, orderOut: nil];
         let _: () = msg_send![window, orderOut: nil];
         let _: () = msg_send![window, release];
         let _: () = msg_send![viewer, release];
