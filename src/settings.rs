@@ -8,7 +8,7 @@ use gpui_kit::{
 
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Sizable, Theme,
+    ActiveTheme, Disableable, IconName, Sizable, Theme, TitleBar,
     alert::Alert,
     button::Button,
     input::{Input, InputEvent, InputState},
@@ -173,13 +173,14 @@ impl Render for Settings {
             muted
         };
 
-        div().id("settings-scroll").test_support().size_full().overflow_y_scroll()
+        div().size_full().flex().flex_col()
             .bg(theme.background).text_color(theme.foreground).text_size(px(13.)).font_family(theme.font_family.clone())
+            .child(TitleBar::new().bg(theme.background).border_color(border).pr_4()
+                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child("Capstan"))
+                .child(div().flex().items_center().gap_2().text_size(px(11.)).text_color(status_color)
+                    .child(div().size(px(6.)).rounded_full().bg(status_color)).child(status)))
+            .child(div().id("settings-scroll").test_support().flex_1().min_h_0().overflow_y_scroll()
             .child(div().flex().flex_col().gap_4().p_4()
-                .child(div().flex().justify_between().items_center()
-                    .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child("Capstan"))
-                    .child(div().flex().items_center().gap_2().text_size(px(11.)).text_color(status_color)
-                        .child(div().size(px(6.)).rounded_full().bg(status_color)).child(status)))
                 .when(!permissions.ready() || self.needs_restart, |view| view.child(self.permission_panel(permissions, cx)))
                 .when_some(self.input_error.clone(), |view, error| view.child(div().id("input-error").test_support().child(Alert::error("input-alert", error))))
                 .when_some(self.message.clone(), |view, feedback| view.child(div().id("settings-message").test_support().child(match feedback {
@@ -239,7 +240,7 @@ impl Render for Settings {
                                 Err(error) => Feedback::Error(format!("{error}. Current settings unchanged.")),
                             });
                             cx.notify();
-                        })))))
+                        }))))))
     }
 }
 
@@ -337,9 +338,9 @@ pub fn run(input: Arc<Context>) {
                 window_min_size: Some(size(px(420.), px(340.))),
                 titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some("Capstan".into()),
-                    ..Default::default()
+                    ..TitleBar::title_bar_options()
                 }),
-                ..Default::default()
+                ..TitleBar::window_options()
             },
             cx,
             |window, cx| {
@@ -409,7 +410,7 @@ pub fn check_ui() {
                     })),
                     focus: false,
                     show: false,
-                    ..Default::default()
+                    ..TitleBar::window_options()
                 },
                 cx,
                 |window, cx| {
