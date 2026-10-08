@@ -25,7 +25,9 @@ The current build is for **Apple Silicon Macs running macOS 14 or newer**.
 2. Quit Karabiner-Elements or other keyboard remappers.
 3. Open Capstan, grant **Input Monitoring** and **Accessibility**, then quit and reopen it.
 
-**General** controls remapping and Launch at login. **Customize** changes the tap key, held modifier and timeout. **Advanced** contains menu-bar visibility, Event Viewer and Reload Settings.
+- **General** controls remapping and Launch at login.
+- **Customize** changes the tap key, held modifier and timeout. -
+- **Advanced** contains menu-bar visibility, Event Viewer and Reload Settings.
 
 Closing settings keeps remapping running. Open Capstan again to return, even if its menu icon is hidden.
 
@@ -47,16 +49,10 @@ scripts/build-app
 
 The signed app is written to `dist/Capstan.app`. Set `CAPS_TAP_SIGNING_IDENTITY` to use a different signing certificate.
 
-## Sharing
-
-Local and ad hoc signatures are **not** Apple-verified distribution trust. Gatekeeper or company device management may block these builds.
-
-For wider distribution, use a **Developer ID certificate and notarization**, which require Apple Developer Program membership. Managed Macs may still need IT approval.
-
 ## Settings and development
 
 Settings live in `~/Library/Application Support/Capstan/settings.json`. UI changes save automatically; external edits need **Advanced → Reload Settings**.
 
 See [development notes](docs/development.md) for the JSON format, tests and packaging details.
 
-Capstan is experimental. Secure input, sleep/wake and interrupted keyboard access need further real-device testing.
+Capstan is experimental!!!
