@@ -8,10 +8,11 @@ use gpui_kit::{
 
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Sizable, Theme, TitleBar,
+    ActiveTheme, Disableable, IconName, IndexPath, Sizable, Theme, TitleBar,
     alert::Alert,
     button::Button,
     input::{Input, InputEvent, InputState},
+    select::{SearchableVec, Select, SelectEvent, SelectState},
     switch::Switch,
 };
 
@@ -40,6 +41,9 @@ struct Settings {
     message: Option<Feedback>,
     timeout_input: Option<Entity<InputState>>,
     timeout_subscription: Option<Subscription>,
+    tap_select: Option<Entity<SelectState<SearchableVec<&'static str>>>>,
+    hold_select: Option<Entity<SelectState<SearchableVec<&'static str>>>>,
+    mapping_subscriptions: Vec<Subscription>,
     config: config::Config,
     config_path: Result<std::path::PathBuf, String>,
 }
@@ -63,9 +67,79 @@ impl Settings {
                 }),
             );
         self.timeout_input = Some(state);
+        self.setup_mapping(window, cx);
+    }
+
+    fn setup_mapping(&mut self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        for tap in [true, false] {
+            let labels: Vec<_> = if tap {
+                config::TapKey::ALL.iter().map(|v| v.label()).collect()
+            } else {
+                config::HoldModifier::ALL
+                    .iter()
+                    .map(|v| v.label())
+                    .collect()
+            };
+            let selected = if tap {
+                self.config.tap_key.label()
+            } else {
+                self.config.hold_modifier.label()
+            };
+            let index = labels.iter().position(|v| *v == selected).unwrap();
+            let state = cx.new(|cx| {
+                SelectState::new(
+                    SearchableVec::new(labels),
+                    Some(IndexPath::new(index)),
+                    window,
+                    cx,
+                )
+            });
+            self.mapping_subscriptions.push(cx.subscribe_in(
+                &state,
+                window,
+                move |this, _, event, window, cx| {
+                    if let SelectEvent::Confirm(Some(label)) = event {
+                        let mut config = this.config.clone();
+                        if tap {
+                            if let Some(value) = config::TapKey::ALL
+                                .into_iter()
+                                .find(|v| v.label() == *label)
+                            {
+                                config.tap_key = value;
+                            }
+                        } else if let Some(value) = config::HoldModifier::ALL
+                            .into_iter()
+                            .find(|v| v.label() == *label)
+                        {
+                            config.hold_modifier = value;
+                        }
+                        this.message = this.save(config).err().map(Feedback::Error);
+                        this.sync_mapping(window, cx);
+                        cx.notify();
+                    }
+                },
+            ));
+            if tap {
+                self.tap_select = Some(state);
+            } else {
+                self.hold_select = Some(state);
+            }
+        }
+    }
+
+    fn sync_mapping(&self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        for (state, label) in [
+            (&self.tap_select, self.config.tap_key.label()),
+            (&self.hold_select, self.config.hold_modifier.label()),
+        ] {
+            if let Some(state) = state {
+                state.update(cx, |state, cx| state.set_selected_value(&label, window, cx));
+            }
+        }
     }
 
     fn sync_timeout(&self, window: &mut Window, cx: &mut ViewContext<Self>) {
+        self.sync_mapping(window, cx);
         if let Some(state) = &self.timeout_input {
             state.update(cx, |state, cx| {
                 state.set_value(self.config.escape_timeout_ms.to_string(), window, cx)
@@ -189,12 +263,20 @@ impl Render for Settings {
                 })))
                 .child(div().flex().flex_col().rounded_lg().border_1().border_color(border)
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
-                        .child(setting_label("Remap Caps Lock", "Tap → Escape · Hold → Control", cx))
+                        .child(setting_label("Remap Caps Lock", "Native Caps Lock is suppressed while enabled.", cx))
                         .child(Switch::new("remapping").small().accessibility_label("Enable remapping").checked(remapping).disabled(!usable)
                             .on_change(cx.listener(|this, enabled, _, cx| {
                                 this.message = this.save(config::Config { remapping_enabled: *enabled, ..this.config.clone() }).err().map(Feedback::Error);
                                 cx.notify();
                             }))))
+                    .child(div().h_px().bg(border))
+                    .child(div().flex().justify_between().items_center().gap_3().p_3()
+                        .child(setting_label("On tap", "Released alone before the timeout.", cx))
+                        .when_some(self.tap_select.clone(), |view, state| view.child(div().w(px(145.)).h(px(28.)).child(Select::new(&state).id("tap-key").small().accessibility_label("On tap key").disabled(!usable)))))
+                    .child(div().h_px().bg(border))
+                    .child(div().flex().justify_between().items_center().gap_3().p_3()
+                        .child(setting_label("While held", "Starts immediately. Chords cancel the tap.", cx))
+                        .when_some(self.hold_select.clone(), |view, state| view.child(div().w(px(145.)).h(px(28.)).child(Select::new(&state).id("hold-modifier").small().accessibility_label("While held modifier").disabled(!usable)))))
                     .child(div().h_px().bg(border))
                     .child(div().flex().flex_col().gap_2().p_3()
                         .child(div().flex().items_center().justify_between().gap_2()
@@ -212,7 +294,7 @@ impl Render for Settings {
                             .child(Button::new("apply-timeout").small().label("Apply").outline().disabled(!usable)
                                 .on_click(cx.listener(|this, _, window, cx| this.save_timeout(window, cx)))))
                         .child(div().text_size(px(11.)).text_color(muted).child(if usable {
-                            "Hold longer to cancel Escape. Changes apply to the next press."
+                            "Hold longer to cancel the tap. Changes apply to the next press."
                         } else { "Available after restart once input permissions are ready." })))
                     .child(div().h_px().bg(border))
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
@@ -332,7 +414,7 @@ pub fn run(input: Arc<Context>) {
         let running = !needs_restart && input_error.is_none();
         let menu_input = input.clone();
         let show_menu_bar_icon = config.show_menu_bar_icon;
-        let bounds = Bounds::centered(None, size(px(440.), px(430.)), cx);
+        let bounds = Bounds::centered(None, size(px(440.), px(620.)), cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -363,6 +445,9 @@ pub fn run(input: Arc<Context>) {
                         config_path,
                         timeout_input: None,
                         timeout_subscription: None,
+                        tap_select: None,
+                        hold_select: None,
+                        mapping_subscriptions: vec![],
                     };
                     settings.setup_timeout(window, cx);
                     settings
@@ -412,7 +497,7 @@ pub fn check_ui() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: Default::default(),
-                        size: size(px(440.), px(430.)),
+                        size: size(px(440.), px(620.)),
                     })),
                     focus: false,
                     show: false,
@@ -436,6 +521,9 @@ pub fn check_ui() {
                             message: None,
                             timeout_input: None,
                             timeout_subscription: None,
+                            tap_select: None,
+                            hold_select: None,
+                            mapping_subscriptions: vec![],
                             config: active.clone(),
                             config_path: Ok(path.clone()),
                         };
@@ -456,11 +544,28 @@ pub fn check_ui() {
         assert!(reload.origin.y >= viewport.origin.y);
         assert!(
             reload.bottom() <= viewport.bottom(),
-            "Reload must fit the normal compact window"
+            "Reload must fit the normal compact window: reload={reload:?}, viewport={viewport:?}"
         );
         assert_eq!(
             window.find("escape-timeout").label(),
             Some("Escape window in milliseconds")
+        );
+        window.within("tap-key").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        assert_eq!(config::load(&path).unwrap().tap_key, config::TapKey::Tab);
+        window.within("hold-modifier").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        assert_eq!(
+            config::load(&path).unwrap().hold_modifier,
+            config::HoldModifier::Shift
         );
         window.click("timeout-more", cx);
         assert_eq!(
@@ -538,6 +643,8 @@ pub fn check_ui() {
         window.click("reload-settings", cx);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
         assert_eq!(editor.read(cx).value(), "400");
+        assert_eq!(window.find("tap-key").value(), Some("Escape"));
+        assert_eq!(window.find("hold-modifier").value(), Some("Control"));
         assert!(matches!(view.read(cx).message, Some(Feedback::Success(_))));
         view.update(cx, |view, cx| {
             view.message = None;
@@ -674,6 +781,9 @@ mod tests {
             message: None,
             timeout_input: None,
             timeout_subscription: None,
+            tap_select: None,
+            hold_select: None,
+            mapping_subscriptions: vec![],
             config: active.clone(),
             config_path: Ok(path.clone()),
         };

@@ -3,6 +3,83 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TapKey {
+    #[default]
+    Escape,
+    Tab,
+    Return,
+    Backspace,
+    Space,
+}
+
+impl TapKey {
+    pub const ALL: [Self; 5] = [
+        Self::Escape,
+        Self::Tab,
+        Self::Return,
+        Self::Backspace,
+        Self::Space,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Escape => "Escape",
+            Self::Tab => "Tab",
+            Self::Return => "Return",
+            Self::Backspace => "Backspace",
+            Self::Space => "Space",
+        }
+    }
+    pub fn keycode(self) -> u16 {
+        match self {
+            Self::Escape => 53,
+            Self::Tab => 48,
+            Self::Return => 36,
+            Self::Backspace => 51,
+            Self::Space => 49,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldModifier {
+    #[default]
+    Control,
+    Shift,
+    Option,
+    Command,
+}
+
+impl HoldModifier {
+    pub const ALL: [Self; 4] = [Self::Control, Self::Shift, Self::Option, Self::Command];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Control => "Control",
+            Self::Shift => "Shift",
+            Self::Option => "Option",
+            Self::Command => "Command",
+        }
+    }
+    pub fn keycode(self) -> u16 {
+        match self {
+            Self::Control => 59,
+            Self::Shift => 56,
+            Self::Option => 58,
+            Self::Command => 55,
+        }
+    }
+    pub fn flag(self) -> u64 {
+        1 << match self {
+            Self::Control => 18,
+            Self::Shift => 17,
+            Self::Option => 19,
+            Self::Command => 20,
+        }
+    }
+}
+
 pub const MIN_TIMEOUT_MS: u64 = 50;
 pub const MAX_TIMEOUT_MS: u64 = 2000;
 
@@ -12,6 +89,8 @@ pub struct Config {
     pub remapping_enabled: bool,
     pub escape_timeout_ms: u64,
     pub show_menu_bar_icon: bool,
+    pub tap_key: TapKey,
+    pub hold_modifier: HoldModifier,
 }
 
 impl Default for Config {
@@ -20,6 +99,8 @@ impl Default for Config {
             remapping_enabled: true,
             escape_timeout_ms: 300,
             show_menu_bar_icon: true,
+            tap_key: TapKey::default(),
+            hold_modifier: HoldModifier::default(),
         }
     }
 }
@@ -157,6 +238,8 @@ mod tests {
             r#"{"remapping_enabled":"true"}"#,
             r#"{"show_menu_bar_icon":"true"}"#,
             r#"{"escape_timeot_ms":500}"#,
+            r#"{"tap_key":"unknown"}"#,
+            r#"{"hold_modifier":"caps_lock"}"#,
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
@@ -173,6 +256,32 @@ mod tests {
                 .unwrap()
                 .escape_timeout_ms,
             500
+        );
+    }
+
+    #[test]
+    fn mapping_json_round_trips_readable_names_and_legacy_defaults() {
+        for tap_key in TapKey::ALL {
+            for hold_modifier in HoldModifier::ALL {
+                let config = Config {
+                    tap_key,
+                    hold_modifier,
+                    ..Config::default()
+                };
+                assert_eq!(
+                    Config::parse(&serde_json::to_string_pretty(&config).unwrap()).unwrap(),
+                    config
+                );
+            }
+        }
+        let legacy = Config::parse(r#"{"escape_timeout_ms":400}"#).unwrap();
+        assert_eq!(legacy.tap_key, TapKey::Escape);
+        assert_eq!(legacy.hold_modifier, HoldModifier::Control);
+        assert_eq!(
+            Config::parse(r#"{"tap_key":"return","hold_modifier":"option"}"#)
+                .unwrap()
+                .tap_key,
+            TapKey::Return
         );
     }
 

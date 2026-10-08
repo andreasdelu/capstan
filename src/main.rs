@@ -12,8 +12,7 @@ mod settings;
 use std::time::Duration;
 
 const CAPS: i64 = 57;
-const CONTROL: u16 = 59;
-const ESCAPE: u16 = 53;
+use config::{HoldModifier, TapKey};
 const LEFT_MOUSE_DOWN: u32 = 1;
 const RIGHT_MOUSE_DOWN: u32 = 3;
 const OTHER_MOUSE_DOWN: u32 = 25;
@@ -25,6 +24,7 @@ const TAP_DISABLED_BY_USER_INPUT: u32 = 0xffff_ffff;
 const KEYCODE_FIELD: u32 = 9;
 const SOURCE_USER_DATA_FIELD: u32 = 42;
 const CAPS_LOCK_FLAG: u64 = 1 << 16;
+#[cfg(test)]
 const CONTROL_FLAG: u64 = 1 << 18;
 const SYNTHETIC_TAG: i64 = 0x0043_4150_5354_4150;
 #[cfg(test)]
@@ -112,16 +112,39 @@ struct State {
     pressed_at: Option<Duration>,
     chorded: bool,
     timeout: Duration,
+    config: config::Config,
+    tap_key: TapKey,
+    hold_modifier: HoldModifier,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
-    Escape,
-    ControlDown,
-    ControlUp,
+    Tap(TapKey),
+    ModifierDown(HoldModifier),
+    ModifierUp(HoldModifier),
+}
+
+#[cfg(test)]
+impl Action {
+    #[allow(non_upper_case_globals)]
+    const ControlDown: Self = Self::ModifierDown(HoldModifier::Control);
+    #[allow(non_upper_case_globals)]
+    const ControlUp: Self = Self::ModifierUp(HoldModifier::Control);
+    #[allow(non_upper_case_globals)]
+    const Escape: Self = Self::Tap(TapKey::Escape);
 }
 
 impl State {
+    fn configure(&mut self, config: &config::Config) -> Option<Action> {
+        let action = if !config.remapping_enabled {
+            self.cancel()
+        } else {
+            None
+        };
+        self.config = config.clone();
+        action
+    }
+
     fn press(&mut self, now: Duration, timeout: Duration) -> Option<Action> {
         if self.pressed_at.is_some() {
             return None;
@@ -129,7 +152,9 @@ impl State {
         self.pressed_at = Some(now);
         self.timeout = timeout;
         self.chorded = false;
-        Some(Action::ControlDown)
+        self.tap_key = self.config.tap_key;
+        self.hold_modifier = self.config.hold_modifier;
+        Some(Action::ModifierDown(self.hold_modifier))
     }
 
     fn chord(&mut self) {
@@ -160,15 +185,17 @@ impl State {
             );
         }
         self.chorded = false;
-        let mut actions = vec![Action::ControlUp];
+        let mut actions = vec![Action::ModifierUp(self.hold_modifier)];
         if alone {
-            actions.push(Action::Escape);
+            actions.push(Action::Tap(self.tap_key));
         }
         actions
     }
 
     fn cancel(&mut self) -> Option<Action> {
-        self.pressed_at.take().map(|_| Action::ControlUp)
+        self.pressed_at
+            .take()
+            .map(|_| Action::ModifierUp(self.hold_modifier))
     }
 }
 
@@ -185,9 +212,6 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
     }
 
     let context = unsafe { &*(context as *const Context) };
-    if !context.enabled.load(Ordering::Acquire) {
-        return;
-    }
     let down = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
     let timestamp = mac::hid_timestamp(unsafe { IOHIDValueGetTimeStamp(value) });
     if debug() {
@@ -197,11 +221,12 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
         );
     }
     let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.config.remapping_enabled {
+        return;
+    }
     if down {
-        if let Some(action) = state.press(
-            timestamp,
-            Duration::from_millis(context.escape_timeout_ms.load(Ordering::Acquire)),
-        ) {
+        let timeout = Duration::from_millis(state.config.escape_timeout_ms);
+        if let Some(action) = state.press(timestamp, timeout) {
             unsafe {
                 emit(action, None);
             }
@@ -218,23 +243,20 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
 
 // Synthetic HID events pass through our event tap again; tag and ignore them.
 unsafe fn emit(action: Action, proxy: Option<Ref>) {
+    let tap = matches!(action, Action::Tap(_));
     let (key, flags, kind) = match action {
-        Action::Escape => (ESCAPE, 0, KEY_DOWN),
-        Action::ControlDown => (CONTROL, CONTROL_FLAG, FLAGS_CHANGED),
-        Action::ControlUp => (CONTROL, 0, FLAGS_CHANGED),
+        Action::Tap(key) => (key.keycode(), 0, KEY_DOWN),
+        Action::ModifierDown(modifier) => (modifier.keycode(), modifier.flag(), FLAGS_CHANGED),
+        Action::ModifierUp(modifier) => (modifier.keycode(), 0, FLAGS_CHANGED),
     };
-    for down in if key == ESCAPE {
-        &[true, false][..]
-    } else {
-        &[true][..]
-    } {
+    for down in if tap { &[true, false][..] } else { &[true][..] } {
         let event = unsafe { CGEventCreateKeyboardEvent(ptr::null_mut(), key, *down) };
         if event.is_null() {
             eprintln!("could not create keyboard event");
             continue;
         }
         unsafe {
-            CGEventSetType(event, if key == ESCAPE && !down { KEY_UP } else { kind });
+            CGEventSetType(event, if tap && !down { KEY_UP } else { kind });
             CGEventSetFlags(event, flags);
             CGEventSetIntegerValueField(event, SOURCE_USER_DATA_FIELD, SYNTHETIC_TAG);
             if let Some(proxy) = proxy {
@@ -279,7 +301,7 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
     }
     // Filtering Caps events alone does not remove the native lock bit from later input.
     unsafe {
-        CGEventSetFlags(event, remapped_flags(CGEventGetFlags(event), false));
+        CGEventSetFlags(event, remapped_flags(CGEventGetFlags(event), None));
     }
     if matches!(
         kind,
@@ -295,7 +317,10 @@ unsafe extern "C" fn callback(proxy: Ref, kind: u32, event: Ref, context: Ref) -
                 state.chord();
             }
             unsafe {
-                CGEventSetFlags(event, remapped_flags(CGEventGetFlags(event), true));
+                CGEventSetFlags(
+                    event,
+                    remapped_flags(CGEventGetFlags(event), Some(state.hold_modifier)),
+                );
             }
         }
     }
@@ -316,8 +341,8 @@ fn cancels_escape(kind: u32, key: i64, synthetic: bool) -> bool {
     }
 }
 
-fn remapped_flags(flags: u64, control_pressed: bool) -> u64 {
-    (flags & !CAPS_LOCK_FLAG) | if control_pressed { CONTROL_FLAG } else { 0 }
+fn remapped_flags(flags: u64, modifier: Option<HoldModifier>) -> u64 {
+    (flags & !CAPS_LOCK_FLAG) | modifier.map_or(0, HoldModifier::flag)
 }
 
 fn keyboard_matching() -> Option<Ref> {
@@ -360,9 +385,19 @@ fn keyboard_matching() -> Option<Ref> {
 
 impl Context {
     fn apply_config(&self, config: &config::Config) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(action) = state.configure(config) {
+            unsafe {
+                emit(action, None);
+            }
+        }
+        if config.remapping_enabled {
+            self.clear_caps_lock();
+        }
         self.escape_timeout_ms
             .store(config.escape_timeout_ms, Ordering::Release);
-        self.set_enabled(config.remapping_enabled);
+        self.enabled
+            .store(config.remapping_enabled, Ordering::Release);
     }
 
     fn clear_caps_lock(&self) {
@@ -371,20 +406,6 @@ impl Context {
         {
             eprintln!("{error}");
         }
-    }
-
-    fn set_enabled(&self, enabled: bool) {
-        if enabled {
-            self.clear_caps_lock();
-        } else {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(action) = state.cancel() {
-                unsafe {
-                    emit(action, None);
-                }
-            }
-        }
-        self.enabled.store(enabled, Ordering::Release);
     }
 }
 
@@ -459,17 +480,59 @@ mod tests {
         let shift = 1 << 17;
         let command = 1 << 20;
         assert_eq!(
-            remapped_flags(CAPS_LOCK_FLAG | shift | command, false),
+            remapped_flags(CAPS_LOCK_FLAG | shift | command, None),
             shift | command
         );
         assert_eq!(
-            remapped_flags(CAPS_LOCK_FLAG | shift, true),
+            remapped_flags(CAPS_LOCK_FLAG | shift, Some(HoldModifier::Control)),
             shift | CONTROL_FLAG
         );
         assert_eq!(
-            remapped_flags(CAPS_LOCK_FLAG | CONTROL_FLAG, false),
+            remapped_flags(CAPS_LOCK_FLAG | CONTROL_FLAG, None),
             CONTROL_FLAG
         );
+    }
+
+    #[test]
+    fn mapping_snapshot_and_disable_release_the_original_modifier() {
+        for modifier in HoldModifier::ALL {
+            for tap in TapKey::ALL {
+                let mut state = State::default();
+                state.configure(&config::Config {
+                    hold_modifier: modifier,
+                    tap_key: tap,
+                    ..config::Config::default()
+                });
+                assert_eq!(
+                    state.press(Duration::ZERO, ALONE_TIMEOUT),
+                    Some(Action::ModifierDown(modifier))
+                );
+                state.configure(&config::Config::default());
+                assert_eq!(
+                    state.release(Duration::from_millis(100)),
+                    vec![Action::ModifierUp(modifier), Action::Tap(tap)]
+                );
+                state.configure(&config::Config {
+                    hold_modifier: modifier,
+                    tap_key: tap,
+                    ..config::Config::default()
+                });
+                state.press(Duration::ZERO, ALONE_TIMEOUT);
+                assert_eq!(
+                    state.configure(&config::Config {
+                        remapping_enabled: false,
+                        ..config::Config::default()
+                    }),
+                    Some(Action::ModifierUp(modifier))
+                );
+                assert!(state.release(Duration::from_millis(100)).is_empty());
+                assert_eq!(state.cancel(), None);
+                assert_eq!(
+                    remapped_flags(CAPS_LOCK_FLAG | CONTROL_FLAG, Some(modifier)),
+                    CONTROL_FLAG | modifier.flag()
+                );
+            }
+        }
     }
 
     #[test]
