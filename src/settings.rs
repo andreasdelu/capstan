@@ -330,6 +330,7 @@ pub fn run(input: Arc<Context>) {
             eprintln!("caps-tap: {error}");
         }
         let running = !needs_restart && input_error.is_none();
+        let menu_input = input.clone();
         let show_menu_bar_icon = config.show_menu_bar_icon;
         let bounds = Bounds::centered(None, size(px(440.), px(430.)), cx);
         gpui_kit::open_window(
@@ -369,7 +370,12 @@ pub fn run(input: Arc<Context>) {
             },
         )
         .expect("failed to open settings window");
-        mac::install_status_menu(running);
+        mac::install_status_menu(move || mac::MenuStatus {
+            input_available: running,
+            enabled: menu_input.enabled.load(Ordering::Acquire),
+            timeout_ms: menu_input.escape_timeout_ms.load(Ordering::Acquire),
+            login: mac::login_enabled(),
+        });
         mac::set_menu_bar_visible(show_menu_bar_icon);
         cx.activate(true);
     });

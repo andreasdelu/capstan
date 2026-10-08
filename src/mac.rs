@@ -1,11 +1,12 @@
 #![allow(unexpected_cfgs)] // objc 0.2 macros check a legacy cargo-clippy cfg.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::sync::OnceLock;
 
 thread_local! {
     static STATUS_ITEM: Cell<id> = const { Cell::new(nil) };
+    static MENU_STATUS: RefCell<Option<Box<dyn Fn() -> MenuStatus>>> = const { RefCell::new(None) };
 }
 
 // AppKit objects are only accessed on the application's main thread.
@@ -312,12 +313,59 @@ pub fn show_settings() {
     }
 }
 
+pub struct MenuStatus {
+    pub input_available: bool,
+    pub enabled: bool,
+    pub timeout_ms: u64,
+    pub login: bool,
+}
+
+impl MenuStatus {
+    fn labels(&self) -> [String; 3] {
+        [
+            if !self.input_available {
+                "Remapping: input unavailable"
+            } else if self.enabled {
+                "Remapping: On"
+            } else {
+                "Remapping: Off"
+            }
+            .into(),
+            if self.input_available {
+                format!("Tap timeout: {} ms", self.timeout_ms)
+            } else {
+                "Tap timeout: unavailable".into()
+            },
+            format!("Launch at login: {}", if self.login { "On" } else { "Off" }),
+        ]
+    }
+}
+
+extern "C" fn refresh_menu(_: &Object, _: Sel, menu: id) {
+    MENU_STATUS.with(|provider| {
+        if let Some(provider) = provider.borrow().as_ref() {
+            for (index, label) in provider().labels().iter().enumerate() {
+                unsafe {
+                    let item: id = msg_send![menu, itemAtIndex: index];
+                    let label = NSString::alloc(nil).init_str(label);
+                    let _: () = msg_send![item, setTitle: label];
+                    let _: () = msg_send![label, release];
+                }
+            }
+        }
+    });
+}
+
 fn menu_target_class() -> &'static Class {
     static CLASS: OnceLock<&'static Class> = OnceLock::new();
     CLASS.get_or_init(|| {
         let mut decl =
             ClassDecl::new("CapsTapMenuTarget", class!(NSObject)).expect("menu target class");
         unsafe {
+            decl.add_method(
+                sel!(menuNeedsUpdate:),
+                refresh_menu as extern "C" fn(&Object, Sel, id),
+            );
             decl.add_method(
                 sel!(openSettings:),
                 open_settings as extern "C" fn(&Object, Sel, id),
@@ -327,8 +375,38 @@ fn menu_target_class() -> &'static Class {
     })
 }
 
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+    #[test]
+    fn status_reports_enabled_not_merely_running() {
+        let mut status = MenuStatus {
+            input_available: true,
+            enabled: false,
+            timeout_ms: 400,
+            login: false,
+        };
+        assert_eq!(
+            status.labels(),
+            [
+                "Remapping: Off",
+                "Tap timeout: 400 ms",
+                "Launch at login: Off"
+            ]
+        );
+        status.enabled = true;
+        status.login = true;
+        assert_eq!(status.labels()[0], "Remapping: On");
+        assert_eq!(status.labels()[2], "Launch at login: On");
+        status.input_available = false;
+        assert_eq!(status.labels()[0], "Remapping: input unavailable");
+        assert_eq!(status.labels()[1], "Tap timeout: unavailable");
+    }
+}
+
 // Small native status menu; the settings themselves are GPUI.
-pub fn install_status_menu(running: bool) {
+pub fn install_status_menu(status: impl 'static + Fn() -> MenuStatus) {
+    MENU_STATUS.with(|provider| *provider.borrow_mut() = Some(Box::new(status)));
     unsafe {
         let bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
         let item: id = msg_send![bar, statusItemWithLength: -1.0f64];
@@ -351,17 +429,17 @@ pub fn install_status_menu(running: bool) {
         let _: () = msg_send![button, setAccessibilityLabel: label];
 
         let menu: id = msg_send![class!(NSMenu), new];
-        let label = NSString::alloc(nil).init_str(if running {
-            "Capstan is running"
-        } else {
-            "Capstan: input unavailable"
-        });
         let empty = NSString::alloc(nil).init_str("");
-        let running: id = msg_send![class!(NSMenuItem), alloc];
-        let running: id =
-            msg_send![running, initWithTitle: label action: sel!(nothing:) keyEquivalent: empty];
-        let _: () = msg_send![running, setEnabled: NO];
-        let _: () = msg_send![menu, addItem: running];
+        for _ in 0..3 {
+            let row: id = msg_send![class!(NSMenuItem), alloc];
+            let row: id =
+                msg_send![row, initWithTitle: empty action: sel!(nothing:) keyEquivalent: empty];
+            let _: () = msg_send![row, setEnabled: NO];
+            let _: () = msg_send![menu, addItem: row];
+            let _: () = msg_send![row, release];
+        }
+        let separator: id = msg_send![class!(NSMenuItem), separatorItem];
+        let _: () = msg_send![menu, addItem: separator];
 
         let app: id = msg_send![class!(NSApplication), sharedApplication];
         let open = NSString::alloc(nil).init_str("Open Settings");
@@ -369,6 +447,8 @@ pub fn install_status_menu(running: bool) {
         let open_item: id = msg_send![open_item, initWithTitle: open action: sel!(openSettings:) keyEquivalent: empty];
         // NSMenuItem's target is not retained; keep this one target until process exit.
         let target: id = msg_send![menu_target_class(), new];
+        let _: () = msg_send![menu, setDelegate: target];
+        refresh_menu(&*target, sel!(menuNeedsUpdate:), menu);
         let _: () = msg_send![open_item, setTarget: target];
         let _: () = msg_send![menu, addItem: open_item];
 
