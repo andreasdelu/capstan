@@ -14,6 +14,7 @@ use std::time::Duration;
 pub struct EventViewer {
     input: Arc<Context>,
     details_open: bool,
+    input_available: bool,
 }
 
 impl Drop for EventViewer {
@@ -28,7 +29,7 @@ impl Drop for EventViewer {
 }
 
 impl EventViewer {
-    fn new(input: Arc<Context>, cx: &mut ViewContext<Self>) -> Self {
+    fn new(input: Arc<Context>, input_available: bool, cx: &mut ViewContext<Self>) -> Self {
         // The task holds only a weak entity between ticks; it cannot keep a closed
         // window alive. Snapshot at render, never perform UI work in input callbacks.
         cx.spawn(async move |this, cx| {
@@ -45,6 +46,7 @@ impl EventViewer {
         Self {
             input,
             details_open: false,
+            input_available,
         }
     }
 }
@@ -65,7 +67,9 @@ impl Render for EventViewer {
             .child(TitleBar::new().bg(theme.background).border_color(theme.border).child("Capstan Event Viewer"))
             .child(div().flex().flex_col().gap_3().p_4()
                 .child(div().text_size(px(11.)).text_color(theme.muted_foreground).child("Caps only · 200 events in memory · no export. Translations are not OS delivery proof."))
-                .child(div().child(format!("Current tap cutoff: {timeout} ms · Each press keeps its original cutoff.")))
+                .child(div().id(if self.input_available { "viewer-cutoff-active" } else { "viewer-cutoff-unavailable" }).test_support().child(if self.input_available {
+                    format!("Current tap cutoff: {timeout} ms · Each press keeps its original cutoff.")
+                } else { "Input unavailable · No tap cutoff is active. Quit and reopen after granting permissions.".into() }))
                 .child(div().flex().items_center().gap_2()
                     .child(Button::new("viewer-record").small().label(if recording { "Pause" } else { "Record" }).primary()
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -92,7 +96,12 @@ impl Render for EventViewer {
     }
 }
 
-pub fn open(input: Arc<Context>, existing: &mut Option<AnyWindowHandle>, cx: &mut App) {
+pub fn open(
+    input: Arc<Context>,
+    input_available: bool,
+    existing: &mut Option<AnyWindowHandle>,
+    cx: &mut App,
+) {
     if let Some(handle) = existing
         && handle
             .update(cx, |_, window, _| window.activate_window())
@@ -131,7 +140,7 @@ pub fn open(input: Arc<Context>, existing: &mut Option<AnyWindowHandle>, cx: &mu
                         .stop();
                     true
                 });
-                cx.new(|cx| EventViewer::new(input, cx))
+                cx.new(|cx| EventViewer::new(input, input_available, cx))
             },
         )
         .expect("failed to open event viewer")

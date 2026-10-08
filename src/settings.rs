@@ -332,7 +332,7 @@ impl Render for Settings {
                             }))))
                 .child(div().flex().flex_col().gap_2()
                     .child(Button::new("open-viewer").small().label("Event Viewer").outline()
-                        .on_click(cx.listener(|this, _, _, cx| super::viewer::open(this.input.clone(), &mut this.viewer_window, cx))))
+                        .on_click(cx.listener(|this, _, _, cx| super::viewer::open(this.input.clone(), !this.needs_restart && this.input_error.is_none(), &mut this.viewer_window, cx))))
                     .child(div().text_size(px(11.)).text_color(muted).child("Edited settings.json?"))
                     .child(Button::new("reload-settings").small().label("Reload Settings").icon(IconName::RefreshCw).outline()
                         .tooltip("~/Library/Application Support/Capstan/settings.json")
@@ -872,7 +872,7 @@ pub fn check_ui() {
     .unwrap();
     let mut viewer_handle = app.update(|cx| view.read(cx).viewer_window);
     let viewer = viewer_handle.unwrap();
-    app.update(|cx| super::viewer::open(input.clone(), &mut viewer_handle, cx));
+    app.update(|cx| super::viewer::open(input.clone(), true, &mut viewer_handle, cx));
     assert_eq!(viewer_handle.unwrap(), viewer, "reuse the existing viewer");
     app.update_window(viewer, |_, window, cx| {
         window.render_frame(cx);
@@ -978,6 +978,23 @@ pub fn check_ui() {
     app.update(|_| {});
     assert!(!input.state.lock().unwrap().diagnostics.recording);
     assert!(input.state.lock().unwrap().diagnostics.rows.is_empty());
+    let blocked = Arc::new(Context::default());
+    let mut blocked_viewer = None;
+    app.update(|cx| super::viewer::open(blocked.clone(), false, &mut blocked_viewer, cx));
+    app.update_window(blocked_viewer.unwrap(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("viewer-cutoff-active").is_none());
+        assert!(
+            window
+                .find("viewer-cutoff-unavailable")
+                .bounds()
+                .size
+                .height
+                > px(0.)
+        );
+        window.remove_window();
+    })
+    .unwrap();
     fs::remove_dir_all(dir).unwrap();
     println!(
         "Settings UI: real switch/apply/reload interactions and light/dark/permission Metal renders passed"
