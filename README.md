@@ -1,61 +1,62 @@
+<img src="assets/CapstanIcon.png" width="80" alt="Capstan app icon">
+
 # Capstan
 
-Experimental macOS Caps Lock remapper with a GPUI Kit settings window. Caps acts as Control immediately; if released alone within the configured window (300 ms by default), Escape is sent. A chord or longer hold sends no Escape, matching Andreas's Karabiner rule.
+A small macOS app that gives Caps Lock two jobs:
 
-## Build and try
+- **Tap:** Escape.
+- **Hold:** Control, immediately.
 
-1. Quit Karabiner-Elements completely; it grabs the keyboard even when its Caps rule is disabled.
-2. Create and trust a local **Code Signing** identity named `Caps Tap Local` in Keychain Access (`security find-identity -v -p codesigning` must list it). Run `scripts/build-app` to build and sign the bundle (or set `CAPS_TAP_SIGNING_IDENTITY` to a different valid identity). Then move `dist/Capstan.app` to a **stable location** (such as `/Applications`) before using Launch at Login. Open the `.app` from there. `cargo run` works for UI testing, but cannot enable Launch at Login.
-3. Until both permissions are granted, the settings window shows **Input Monitoring** and **Accessibility** guidance and disables remapping and timeout controls. Bundled Launch at Login remains independently available. Permissions is selected on startup when access is missing or a restart is required. General, Customize, and Advanced remain navigable; Launch at Login, menu visibility, diagnostics, and reload do not require working input. Once permissions are usable after relaunch, the Permissions sidebar item disappears. Capstan does not auto-prompt: click each missing permission to open its System Settings pane, grant Capstan there, then quit and reopen Capstan. macOS may not apply Input Monitoring until relaunch, so there is no in-process Refresh button. If an older build is still listed, remove its old grant before enabling the rebuilt app. The window reports startup errors rather than pretending remapping is active.
-4. Toggle **Enable remapping** (stored in the JSON settings file) or **Launch at login** (macOS Login Items). macOS may require approval in System Settings → General → Login Items. The monochrome template capstan menu refreshes when opened: remapping On/Off (or input unavailable), active tap timeout, and Launch at Login status, followed by Open Settings and Quit. These are configuration/input-startup status, not proof of OS event delivery. **Show menu bar icon** can hide it without stopping remapping. If both the Dock and menu icon are hidden, open `Capstan.app` from Finder or Spotlight to restore settings and the Dock icon. Menu Open Settings and macOS reopen share the same activation action, ordering only the settings window so a dismissed viewer is never resurrected. Capstan installs a focused AppKit delegate reopen handler after GPUI launches because GPUI's default callback skips reopen when macOS reports visible windows; Dock restoration must happen in either case. Settings has a Dock icon while open. Closing it hides the window and Dock icon while remapping stays active; Open Settings in the menu bar brings both back.
+A solo tap must be shorter than 300 ms. Holding longer or pressing another key cancels Escape. Change the keys and timeout in **Customize**.
 
-`scripts/build-app` uses the locked release build, copies the executable into the bundle, and runs `xcrun strip -x` on that copy **before** signing. Removing local symbols reduces distributable size without altering the development binary; stripping after signing would invalidate the signature. The release profile uses `opt-level = "s"`, ThinLTO, and one codegen unit to favor size over compilation speed. These settings leave debug builds unchanged; optimized native-input timing and OS delivery still need physical verification. Icon Composer compilation still packages `Assets.car`, the `.icns` fallback, and the compiler's `CFBundleIconName`/`CFBundleIconFile` keys from the current user icon project. To verify a build without launching it, run `codesign --verify --deep --strict dist/Capstan.app`, `/usr/bin/stat -f '%N: %z bytes' target/release/capstan dist/Capstan.app/Contents/MacOS/capstan`, and `/usr/bin/du -sk dist/Capstan.app` (allocation in KiB, not logical bytes). A same-source, two-profile local comparison measured 24,931,520 raw / 19,252,896 stripped-and-signed executable bytes with Cargo's default release profile, versus 22,777,424 raw / 19,076,464 stripped-and-signed bytes with the selected size profile. The signed executable saves 176,432 bytes (0.92%); the larger raw reduction is not the distributable saving. Candidate compilation took 1m 56s from a fresh target directory on this machine, not a general build-time guarantee. No `opt-level = "z"` sweep or dependency pruning was needed. The final `scripts/build-app` bundle measured 22,777,424 raw / 19,076,496 signed executable bytes, 21,303,118 regular-file bytes in the whole bundle, and 20,816 KiB allocated. A same-resource default-profile bundle measured 19,252,928 signed executable bytes, preserving the same 176,432-byte saving (bundle signatures add 32 bytes compared with the standalone checks above). Sizes vary with source, toolchain, signing, and icon changes. `scripts/build-app` signs the finished bundle with the same local certificate on every build. `codesign -d -r- 'dist/Capstan.app'` should show `identifier "dev.andreasdeleuran.capstap" and certificate leaf = …`, **not** `cdhash`. The switch from the old ad-hoc signature may require one new grant; permission survival after a changed-binary rebuild still needs a live test. Do not commit or export the certificate's private key. Builds and tests do **not** verify macOS input delivery, menu-bar behavior, or login-item registration. No login item is registered by building the app. Diagnostics are a bounded, opt-in in-memory Caps-only model, off by default. They retain at most 200 events: physical timestamps, elapsed milliseconds, the gesture's timeout and decision, suppressed Caps transitions, generic chords, and generated translations. Other keycodes and characters are never stored. The old raw-keycode debug logging is removed; there are no disk logs or exports. Generated translations are not OS delivery proof; event creation failures are distinguished from generation. Timing uses the HID event timestamps rather than callback delivery times, so a delayed callback does not change the tap window. Modifier chords require a real modifier keycode; state-only flags notifications (observed as keycode 255 around Caps transitions) do not cancel an alone tap. Capture does not affect the remapping policy. Open **Event Viewer** from settings for a separate Kit window. It starts stopped; **Record** opts in, a red **Stop** stops capture without changing input, and **Clear** removes the buffer without changing recording state. Closing the viewer stops and clears the session without hiding the app or settings. Opening it again starts stopped; repeated opens reuse the existing window. It refreshes on a 100 ms weak-entity task, never in input callbacks. The single newest-first scroll list projects one concise row per Caps gesture, such as `Tap · 100 ms · Escape` or `Hold · 800 ms · Control`. Chords are `Hold (chord)`, cancellation has no duration, and generation failures remain marked `(failed)`. A quiet note under the controls distinguishes generated keys from OS delivery. Rows use the original press-time mapping, so configuration changes do not rewrite old presses. Raw capture remains bounded internally, not exposed as a disclosure or export. HID and callback timestamps use different references, so the projection pairs typed down/up/cancel records by sequence, never by sorting or timestamp proximity. Recording boundaries separate stopped sessions; a missing/evicted start or mid-gesture recording reports `Partial capture` instead of inventing a mapping or output. A captured press still in progress displays only `Holding…`, without mixing clocks to estimate duration. Stopping or restarting capture cannot revive an old unfinished row. Cancellation duration is unavailable rather than subtracting incompatible clocks. Diagnostics cover active remapping; disabled remapping emits no gesture translations.
+## A quick look
 
-### Reproduce the release-size comparison
+<img src="docs/images/settings.png" width="640" alt="Capstan settings with General, Customize and Advanced navigation">
 
-Candidates use isolated target directories so experiments cannot overwrite the existing release binary. Run the same source and toolchain with these overrides (the default baseline explicitly overrides the committed profile):
+<img src="docs/images/event-viewer.png" width="640" alt="Event Viewer showing Caps press results, durations and mapped keys">
+
+*UI previews rendered from the real components with test data.*
+
+## Try it
+
+The current build is for **Apple Silicon Macs running macOS 14 or newer**.
+
+1. Move `Capstan.app` to **Applications**.
+2. Quit Karabiner-Elements or other keyboard remappers.
+3. Open Capstan, grant **Input Monitoring** and **Accessibility**, then quit and reopen it.
+
+**General** controls remapping and Launch at login. **Customize** changes the tap key, held modifier and timeout. **Advanced** contains menu-bar visibility, Event Viewer and Reload Settings.
+
+Closing settings keeps remapping running. Open Capstan again to return, even if its menu icon is hidden.
+
+### Event Viewer
+
+Press **Record**, then try Caps Lock. Each row shows the action, duration and mapped key. **Stop** ends capture; **Clear** removes it. Closing the viewer stops and clears capture.
+
+Only Caps-related events are retained, in memory, up to 200 events. The viewer reports generated translations, not proof that another app received them.
+
+## Build locally
+
+You need Rust and a recent full Xcode installation with Icon Composer support.
+
+Create a trusted local **Code Signing** certificate named `Caps Tap Local` in Keychain Access, then run:
 
 ```sh
-CARGO_TARGET_DIR=/tmp/capstan-size-default CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo build --release --locked
-CARGO_TARGET_DIR=/tmp/capstan-size-s CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo build --release --locked
-for profile in default s; do
-  dir="/tmp/capstan-size-$profile"
-  cp "$dir/release/capstan" "$dir/packaged"
-  xcrun strip -x "$dir/packaged"
-  codesign --force --sign "${CAPS_TAP_SIGNING_IDENTITY:-Caps Tap Local}" --identifier dev.andreasdeleuran.capstap "$dir/packaged"
-  codesign --verify --strict "$dir/packaged"
-  /usr/bin/stat -f '%N: %z bytes' "$dir/release/capstan" "$dir/packaged"
-done
+scripts/build-app
 ```
 
-Compare the signed copies, not just raw Cargo outputs. `scripts/build-app` builds the selected profile normally and still strips the packaged copy before signing and compiling the current user icon resources. Size measurements are not runtime-performance or native-input benchmarks.
+The signed app is written to `dist/Capstan.app`. Set `CAPS_TAP_SIGNING_IDENTITY` to use a different signing certificate.
 
-## Settings
+## Sharing
 
-Capstan creates `~/Library/Application Support/Capstan/settings.json` on first launch:
+Local and ad hoc signatures are **not** Apple-verified distribution trust. Gatekeeper or company device management may block these builds.
 
-```json
-{
-  "remapping_enabled": true,
-  "escape_timeout_ms": 300,
-  "show_menu_bar_icon": true,
-  "tap_key": "escape",
-  "hold_modifier": "control"
-}
-```
+For wider distribution, use a **Developer ID certificate and notarization**, which require Apple Developer Program membership. Managed Macs may still need IT approval.
 
-On first launch under the new name, Capstan imports a valid `~/Library/Application Support/Caps Tap/settings.json` if the new file is absent, leaving the old file intact. Existing Capstan settings always win, including a file created concurrently during migration. Invalid legacy JSON is reported instead of silently resetting preferences. Without a legacy JSON file, the macOS remapping preference seeds a new file.
+## Settings and development
 
-The app deliberately keeps bundle identifier `dev.andreasdeleuran.capstap` and the existing `Caps Tap Local` signing identity because changing macOS identity would unnecessarily disturb permission and Login Item continuity. Grant survival still needs native verification. `assets/capstan.icon` is the canonical user-edited app icon, with a silhouette layer and native glass treatment. The current project is compiled as supplied; builds do not rewrite its source assets. The build requires Xcode's `actool` with Icon Composer support and compiles it into `Assets.car` plus a legacy `.icns` fallback, merging the compiler's icon-name/file keys into the bundle plist. This lets macOS resolve the layered icon rather than a flattened preview. `assets/CapstanIcon.png` is the user-supplied flattened preview and source for the separate menu template; it is not used to package the app icon. Actual Dock/Finder rendering and appearance variants still need a live check. The compact settings window uses GPUI Kit controls, with 12 px control text, 13 px labels, and quieter 11 px helper text. Success feedback expires after three seconds or a page change so it does not follow unrelated tasks. Failures remain on their originating page until replaced by another action; input-startup errors remain on General. A weak-entity timer with a generation guard cannot dismiss newer feedback or keep the settings entity alive. A GPUI Kit title bar matches the content background, retains native traffic lights, and owns dragging and macOS double-click behavior. The duplicate body heading is removed. The 640×460 window uses a GPUI Kit icon sidebar with a typed, local page selection rather than nested disclosures. General opens by default and separates Remap Caps Lock (with the saved tap/hold/timeout summary) and Launch at login into bordered cards. Customize contains mapping selects and the timeout draft/Apply. Advanced contains menu-icon visibility, Event Viewer, and Reload Settings. Permissions opens first only when missing access or a required restart needs attention; genuine input-startup errors appear on General, not as misleading permission guidance. Changing pages unmounts hidden controls and clears focus, preserving drafts without letting typing reach hidden fields. Content scrolls for smaller windows and long errors. Navigation and non-input controls remain useful while remapping is unavailable. It starts in the system's light or dark appearance. The remapping switch saves and applies immediately. Edit the Escape window using the number field or its ± controls, then click **Apply** or press Enter to save it. The active value stays visible while editing, and invalid values or failed writes leave the live timeout unchanged. You can also edit the JSON and click **Reload Settings** without restarting or rebuilding. A reload validates the entire file before applying it; malformed JSON, unknown keys, or a timeout outside 50–2000 ms show an error and leave active settings unchanged. Invalid startup settings leave remapping off until corrected and reloaded, without overwriting the file. Missing fields use defaults. Launch at Login remains an OS-managed Login Item, not a JSON option.
+Settings live in `~/Library/Application Support/Capstan/settings.json`. UI changes save automatically; external edits need **Advanced → Reload Settings**.
 
-**On tap** selects Escape, Tab, Return, Backspace, or Space; **While held** selects Control, Shift, Option, or Command. JSON uses lowercase names (`tap_key` and `hold_modifier`), with Escape/Control defaults for older files. Both selections save immediately. Mapping and timeout changes affect the next Caps press, not an in-progress gesture: its original modifier is always released. The selected modifier starts immediately; an unchorded release at or beyond the window cancels the tap. Disabling remapping or an interrupted event tap releases the active modifier without sending the tap. This prevents settings changes from stranding the original modifier. Settings are written by same-directory rename so an interrupted write cannot truncate the live file. There is no file watcher: external edits need explicit Reload Settings.
+See [development notes](docs/development.md) for the JSON format, tests and packaging details.
 
-While remapping is enabled, Capstan clears native Caps Lock on activation, processed Caps transitions, and physical release, and strips the Caps flag from forwarded input. Dropping the processed event alone is insufficient because macOS has already updated its lock state. Disabling remapping restores normal Caps behavior; it does not restore a previously active lock.
-
-## UI validation
-
-`cargo test` runs the unit suite, a real AppKit delegate lifecycle test, and a native Metal headless settings harness. The delegate test reproduces GPUI's skipped visible-window reopen, then verifies regular Dock activation policy and native window visibility for both reopen paths, plus settings recovery with an open viewer and non-resurrection of a dismissed viewer. It does not verify Finder/Spotlight delivery, Dock rendering, focus, or Login Items in the installed app. The settings harness interacts with the real view's mapping Selects (including failed-save rollback), switches, Apply/Enter, Event Viewer Record/Stop/Clear and instance reuse/close cleanup, and Reload Settings against temporary JSON files, checks named-editor keyboard traversal and typing without autosave, verifies page-scoped failures, success dismissal on navigation, generation-safe expiry, and persistent input-startup errors, checks distinct General cards, actual sidebar transitions, page fit, hidden-editor focus cleanup, and unavailable-input navigation. It renders General light/dark (`dist/qa/settings-{light,dark}.png`), Customize/Advanced/Permissions light/dark (`dist/qa/settings-{customize,advanced,permissions}-{light,dark}.png`), and blocked-input (`dist/qa/settings-input-error.png`) fixtures. It also renders the separate viewer with controlled mixed-clock tap, chord, long hold, cancellation, and generation-failure fixtures to `dist/qa/event-viewer.png` and `dist/qa/event-viewer-dark.png`, and an active captured hold with the red Stop control to `dist/qa/event-viewer-recording.png` and `dist/qa/event-viewer-recording-dark.png`. Registered row labels assert the rendered result and original mapping, and tests verify Clear retains the recording state and the retired Details/header controls are absent. Projection tests cover bounded eviction, mid-gesture recording, pause/clear boundaries, repeated presses, and configuration changes while held. These are actual component renders with controlled OS-status/input fixtures, not screenshots of the running app. The menu template is embedded from `assets/MenuBarIcon.png`; it contains black glyph pixels with alpha, not the app icon's rounded background. Regenerate it from the selected source using `uv run --with pillow scripts/render-menu-icon.py`. The generator crops inherited app-icon padding and fits the glyph into 16 of the 18 menu-bar points. AppKit applies the tint with `setTemplate:YES`.
-
-No event tap is started, real preferences are not changed, and Login Items are not registered. This protects component wiring and layout while keeping live keyboard/menu-bar/permission testing separate.
-
-This is still a spike: login screen, secure input, sleep/wake, physical Caps Lock state/LED (including the native-state reset), tap interruptions, and stuck modifiers need real-device testing. A disabled event tap is re-enabled and a release of the original selected modifier is attempted, but lost input cannot be recovered. It cannot reliably coexist with a remapper that has exclusive access to the same keyboard.
+Capstan is experimental. Secure input, sleep/wake and interrupted keyboard access need further real-device testing.
