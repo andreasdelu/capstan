@@ -9,11 +9,11 @@ use gpui_kit::{
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
     ActiveTheme, Disableable, IconName, IndexPath, Sizable, Theme, TitleBar,
-    accordion::Accordion,
     alert::Alert,
     button::Button,
     input::{Input, InputEvent, InputState},
     select::{SearchableVec, Select, SelectEvent, SelectState},
+    sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
     switch::Switch,
 };
 
@@ -33,9 +33,26 @@ struct SystemFacts {
     login: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsPage {
+    General,
+    Customize,
+    Advanced,
+    Permissions,
+}
+
+impl SettingsPage {
+    fn initial(needs_attention: bool) -> Self {
+        if needs_attention {
+            Self::Permissions
+        } else {
+            Self::General
+        }
+    }
+}
+
 struct Settings {
-    customize_open: bool,
-    advanced_open: bool,
+    page: SettingsPage,
     #[cfg(test)]
     system_facts: Option<SystemFacts>,
     input: Arc<Context>,
@@ -260,15 +277,31 @@ impl Render for Settings {
                 .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child("Capstan"))
                 .child(div().flex().items_center().gap_2().text_size(px(11.)).text_color(status_color)
                     .child(div().size(px(6.)).rounded_full().bg(status_color)).child(status)))
-            .child(div().id("settings-scroll").test_support().flex_1().min_h_0().overflow_y_scroll()
+            .child(div().flex().flex_1().min_h_0()
+            .child(Sidebar::new("settings-sidebar").w(px(156.)).collapsible(false)
+                .child(SidebarMenu::new().children([
+                    (SettingsPage::General, "General", IconName::Settings),
+                    (SettingsPage::Customize, "Customize", IconName::Settings2),
+                    (SettingsPage::Advanced, "Advanced", IconName::SquareTerminal),
+                    (SettingsPage::Permissions, "Permissions", IconName::CircleAlert),
+                ].into_iter().filter(|(page, _, _)| *page != SettingsPage::Permissions || !permissions.ready() || self.needs_restart)
+                .map(|(page, label, icon)| SidebarMenuItem::new(label).icon(icon).active(self.page == page)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.page != page { window.blur(cx); this.page = page; cx.notify(); }
+                    }))))))
+            .child(div().id("settings-scroll").test_support().flex_1().min_w_0().min_h_0().overflow_y_scroll()
             .child(div().flex().flex_col().gap_4().p_4()
-                .when(!permissions.ready() || self.needs_restart, |view| view.child(self.permission_panel(permissions, cx)))
-                .when_some(self.input_error.clone(), |view, error| view.child(div().id("input-error").test_support().child(Alert::error("input-alert", error))))
+                .child(div().font_weight(FontWeight::MEDIUM).child(match self.page {
+                    SettingsPage::General => "General", SettingsPage::Customize => "Customize remapping",
+                    SettingsPage::Advanced => "Advanced", SettingsPage::Permissions => "Permissions",
+                }))
+                .when(self.page == SettingsPage::Permissions, |view| view.child(self.permission_panel(permissions, cx)))
+                .when_some(self.input_error.clone().filter(|_| self.page == SettingsPage::General), |view, error| view.child(div().id("input-error").test_support().child(Alert::error("input-alert", error))))
                 .when_some(self.message.clone(), |view, feedback| view.child(div().id("settings-message").test_support().child(match feedback {
                     Feedback::Success(text) => Alert::success("settings-alert", text),
                     Feedback::Error(text) => Alert::error("settings-alert", text),
                 })))
-                .child(div().flex().flex_col().rounded_lg().border_1().border_color(border)
+                .when(self.page == SettingsPage::General, |view| view.child(div().id("remap-card").test_support().flex().flex_col().rounded_lg().border_1().border_color(border)
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
                         .child(setting_label("Remap Caps Lock", "Native Caps Lock is suppressed while enabled.", cx))
                         .child(Switch::new("remapping").small().accessibility_label("Enable remapping").checked(remapping).disabled(!usable)
@@ -277,9 +310,8 @@ impl Render for Settings {
                                 cx.notify();
                             }))))
                     .child(div().px_3().pb_2().text_size(px(11.)).text_color(muted).child(format!("Tap {} · Hold {} · {} ms", self.config.tap_key.label(), self.config.hold_modifier.label(), self.config.escape_timeout_ms)))
-                    .child(Accordion::new("customize-remapping").small().bordered(false)
-                        .item(|item| item.open(self.customize_open).title(div().id("customize-title").test_support().child("Customize remapping"))
-                    .when(self.customize_open, |item| item
+                    ))
+                .when(self.page == SettingsPage::Customize, |view| view.child(div().flex().flex_col().rounded_lg().border_1().border_color(border)
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
                         .child(setting_label("On tap", "Released alone before the timeout.", cx))
                         .when_some(self.tap_select.clone(), |view, state| view.child(div().w(px(145.)).h(px(28.)).child(Select::new(&state).id("tap-key").small().accessibility_label("On tap key").disabled(!usable)))))
@@ -305,14 +337,8 @@ impl Render for Settings {
                                 .on_click(cx.listener(|this, _, window, cx| this.save_timeout(window, cx)))))
                         .child(div().text_size(px(11.)).text_color(muted).child(if usable {
                             "Release Caps before this time to send the tap key. Holding longer cancels it."
-                        } else { "Available after restart once input permissions are ready." })))))
-                        .on_toggle_click(cx.listener(|this, indices: &[usize], window, cx| {
-                            this.customize_open = !indices.is_empty();
-                            if !this.customize_open { window.blur(cx); }
-                            cx.notify();
-                        })))
-                    .child(div().h_px().bg(border))
-                    .child(div().flex().justify_between().items_center().gap_3().p_3()
+                        } else { "Input is unavailable. Check General for startup errors or Permissions for access." })))))
+                .when(self.page == SettingsPage::General, |view| view.child(div().id("login-card").test_support().rounded_lg().border_1().border_color(border).flex().justify_between().items_center().gap_3().p_3()
                         .child(setting_label("Launch at login", if bundled { "Start automatically when you sign in." } else { "Open the bundled app to enable this." }, cx))
                         .child(Switch::new("login").small().accessibility_label("Launch at login").checked(login).disabled(!bundled)
                             .on_change(cx.listener(|this, enabled, _, cx| {
@@ -320,9 +346,7 @@ impl Render for Settings {
                                 cx.notify();
                             }))))
                     )
-                .child(Accordion::new("advanced").small()
-                    .item(|item| item.open(self.advanced_open).title(div().id("advanced-title").test_support().child("Advanced"))
-                    .when(self.advanced_open, |item| item
+                .when(self.page == SettingsPage::Advanced, |view| view.child(div().flex().flex_col().gap_4()
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
                         .child(setting_label("Show menu bar icon", "Open Capstan.app to return when hidden.", cx))
                         .child(Switch::new("show-menu-bar").small().accessibility_label("Show menu bar icon").checked(self.config.show_menu_bar_icon)
@@ -342,12 +366,7 @@ impl Render for Settings {
                                 Err(error) => Feedback::Error(format!("{error}. Current settings unchanged.")),
                             });
                             cx.notify();
-                        }))))))
-                    .on_toggle_click(cx.listener(|this, indices: &[usize], window, cx| {
-                        this.advanced_open = !indices.is_empty();
-                        if !this.advanced_open { window.blur(cx); }
-                        cx.notify();
-                    })))))
+                        })))))))))
     }
 }
 
@@ -439,11 +458,11 @@ pub fn run(input: Arc<Context>) {
         let running = !needs_restart && input_error.is_none();
         let menu_input = input.clone();
         let show_menu_bar_icon = config.show_menu_bar_icon;
-        let bounds = Bounds::centered(None, size(px(440.), px(570.)), cx);
+        let bounds = Bounds::centered(None, size(px(640.), px(460.)), cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(420.), px(340.))),
+                window_min_size: Some(size(px(600.), px(340.))),
                 titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some("Capstan".into()),
                     ..TitleBar::title_bar_options()
@@ -460,8 +479,7 @@ pub fn run(input: Arc<Context>) {
                 });
                 cx.new(|cx| {
                     let mut settings = Settings {
-                        customize_open: false,
-                        advanced_open: false,
+                        page: SettingsPage::initial(needs_restart),
                         #[cfg(test)]
                         system_facts: None,
                         input,
@@ -528,7 +546,7 @@ pub fn check_ui() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: Default::default(),
-                        size: size(px(440.), px(570.)),
+                        size: size(px(640.), px(460.)),
                     })),
                     focus: false,
                     show: false,
@@ -538,8 +556,7 @@ pub fn check_ui() {
                 |window, cx| {
                     cx.new(|cx| {
                         let mut settings = Settings {
-                            customize_open: false,
-                            advanced_open: false,
+                            page: SettingsPage::initial(false),
                             system_facts: Some(SystemFacts {
                                 permissions: mac::Permissions {
                                     input_monitoring: true,
@@ -582,10 +599,18 @@ pub fn check_ui() {
         ] {
             assert!(
                 window.try_find(id).is_none(),
-                "{id} must be unmounted while collapsed"
+                "{id} must be unmounted on General"
             );
         }
         assert!(window.find("login").visible());
+        assert_eq!(view.read(cx).page, SettingsPage::General);
+        let remap = window.find("remap-card").bounds();
+        let login = window.find("login-card").bounds();
+        assert!(
+            login.origin.y > remap.bottom(),
+            "General has separate cards"
+        );
+        assert!(login.bottom() < window.find("settings-scroll").bounds().bottom());
     })
     .unwrap();
     app.capture_screenshot(handle)
@@ -604,17 +629,13 @@ pub fn check_ui() {
     app.update_window(handle, |_, window, cx| {
         Theme::change(ThemeMode::Light, Some(window), cx);
         window.render_frame(cx);
-        window.click("customize-title", cx);
-        window.click("advanced-title", cx);
-        assert!(view.read(cx).customize_open && view.read(cx).advanced_open);
+        window.click("0-1", cx);
+        assert_eq!(view.read(cx).page, SettingsPage::Customize);
+        assert!(window.try_find("login").is_none());
         assert!(window.find("apply-timeout").bounds().size.width > px(0.));
         let viewport = window.find("settings-scroll").bounds();
-        let reload = window.find("reload-settings").bounds();
-        assert!(reload.origin.y >= viewport.origin.y);
-        assert!(
-            reload.bottom() > viewport.bottom(),
-            "Expanded controls scroll"
-        );
+        let apply = window.find("apply-timeout").bounds();
+        assert!(apply.bottom() < viewport.bottom(), "Customize fits");
         assert_eq!(
             window.find("escape-timeout").label(),
             Some("Escape window in milliseconds")
@@ -672,26 +693,44 @@ pub fn check_ui() {
         );
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
         window.click("timeout-less", cx);
-        window.scroll(
-            "settings-scroll",
-            ScrollDelta::Pixels(point(px(0.), px(-600.))),
-            cx,
+        window.click("escape-timeout", cx);
+        assert_eq!(window.find("escape-timeout").focused(), Some(true));
+        window.click("0-2", cx);
+        assert_eq!(view.read(cx).page, SettingsPage::Advanced);
+        assert!(window.try_find("escape-timeout").is_none());
+        assert!(
+            !view
+                .read(cx)
+                .timeout_input
+                .as_ref()
+                .unwrap()
+                .focus_handle(cx)
+                .is_focused(window)
         );
+        window.input("999", cx);
+        window.press("enter", cx);
+        assert_eq!(
+            view.read(cx)
+                .timeout_input
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .value(),
+            "400"
+        );
+        assert_eq!(config::load(&path).unwrap().escape_timeout_ms, 400);
         window.click("show-menu-bar", cx);
         assert!(!config::load(&path).unwrap().show_menu_bar_icon);
         assert!(input.enabled.load(Ordering::Acquire));
         window.click("show-menu-bar", cx);
         assert!(config::load(&path).unwrap().show_menu_bar_icon);
-        window.scroll(
-            "settings-scroll",
-            ScrollDelta::Pixels(point(px(0.), px(600.))),
-            cx,
-        );
+        window.click("0-0", cx);
         window.click("remapping", cx);
         assert!(!input.enabled.load(Ordering::Acquire));
         assert!(!config::load(&path).unwrap().remapping_enabled);
         window.click("remapping", cx);
         assert!(input.enabled.load(Ordering::Acquire));
+        window.click("0-1", cx);
         window.click("escape-timeout", cx);
         window.press("cmd-a", cx);
         window.input("550", cx);
@@ -720,12 +759,26 @@ pub fn check_ui() {
     app.update_window(handle, |_, window, cx| {
         let editor = view.read(cx).timeout_input.clone().unwrap();
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
+        let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        fs::write(&temp, "other writer").unwrap();
+        editor.update(cx, |editor, cx| editor.set_value("750", window, cx));
+        window.render_frame(cx);
+        window.click("apply-timeout", cx);
+        assert_eq!(
+            editor.read(cx).value(),
+            "750",
+            "Failed saves retain the draft"
+        );
+        assert_eq!(config::load(&path).unwrap().escape_timeout_ms, 650);
+        assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
+        fs::remove_file(temp).unwrap();
         editor.update(cx, |editor, cx| editor.set_value("20", window, cx));
         window.render_frame(cx);
         window.click("apply-timeout", cx);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
         assert!(matches!(view.read(cx).message, Some(Feedback::Error(_))));
         fs::write(&path, "invalid JSON").unwrap();
+        window.click("0-2", cx);
         window.scroll(
             "settings-scroll",
             ScrollDelta::Pixels(point(px(0.), px(-600.))),
@@ -746,6 +799,7 @@ pub fn check_ui() {
         window.click("reload-settings", cx);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
         assert_eq!(editor.read(cx).value(), "400");
+        window.click("0-1", cx);
         assert_eq!(window.find("tap-key").value(), Some("Escape"));
         assert_eq!(window.find("hold-modifier").value(), Some("Control"));
         assert!(matches!(view.read(cx).message, Some(Feedback::Success(_))));
@@ -763,7 +817,7 @@ pub fn check_ui() {
     .unwrap();
     app.capture_screenshot(handle)
         .expect("Metal rendering unavailable")
-        .save("dist/qa/settings-expanded-light.png")
+        .save("dist/qa/settings-customize-light.png")
         .unwrap();
     app.update_window(handle, |_, window, cx| {
         Theme::change(ThemeMode::Dark, Some(window), cx);
@@ -772,8 +826,22 @@ pub fn check_ui() {
     .unwrap();
     app.capture_screenshot(handle)
         .unwrap()
-        .save("dist/qa/settings-expanded-dark.png")
+        .save("dist/qa/settings-customize-dark.png")
         .unwrap();
+    for (mode, name) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
+        app.update_window(handle, |_, window, cx| {
+            Theme::change(mode, Some(window), cx);
+            window.render_frame(cx);
+            window.click("0-2", cx);
+            let viewport = window.find("settings-scroll").bounds();
+            assert!(window.find("reload-settings").bounds().bottom() < viewport.bottom());
+        })
+        .unwrap();
+        app.capture_screenshot(handle)
+            .unwrap()
+            .save(format!("dist/qa/settings-advanced-{name}.png"))
+            .unwrap();
+    }
     app.update_window(handle, |_, window, cx| {
         Theme::change(ThemeMode::Light, Some(window), cx);
         view.update(cx, |view, cx| {
@@ -783,11 +851,11 @@ pub fn check_ui() {
                 accessibility: false,
             };
             view.needs_restart = true;
+            view.page = SettingsPage::initial(true);
             cx.notify();
         });
         window.render_frame(cx);
-        window.click("customize-title", cx);
-        window.click("advanced-title", cx);
+        assert_eq!(view.read(cx).page, SettingsPage::Permissions);
         assert!(window.try_find("escape-timeout").is_none());
         let editor = view.read(cx).timeout_input.clone().unwrap();
         assert!(!editor.focus_handle(cx).is_focused(window));
@@ -796,15 +864,33 @@ pub fn check_ui() {
         let permission = window.find("input-permission").bounds();
         let viewport = window.find("settings-scroll").bounds();
         assert!(permission.origin.y < viewport.bottom() && permission.bottom() > viewport.origin.y);
+        window.click("0-0", cx);
         window.click("remapping", cx);
         assert!(!view.read(cx).input.enabled.load(Ordering::Acquire));
+        assert!(window.find("login").visible());
+        window.click("0-1", cx);
+        window.click("timeout-more", cx);
+        assert_eq!(editor.read(cx).value(), "400");
+        window.click("apply-timeout", cx);
+        assert!(!view.read(cx).input.enabled.load(Ordering::Acquire));
+        window.click("0-3", cx);
     })
     .unwrap();
     app.capture_screenshot(handle)
         .unwrap()
-        .save("dist/qa/settings-permissions.png")
+        .save("dist/qa/settings-permissions-light.png")
         .unwrap();
     app.update_window(handle, |_, window, cx| {
+        Theme::change(ThemeMode::Dark, Some(window), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    app.capture_screenshot(handle)
+        .unwrap()
+        .save("dist/qa/settings-permissions-dark.png")
+        .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        Theme::change(ThemeMode::Light, Some(window), cx);
         view.update(cx, |view, cx| {
             view.system_facts.as_mut().unwrap().permissions = mac::Permissions {
                 input_monitoring: true,
@@ -823,7 +909,7 @@ pub fn check_ui() {
         )
         .unwrap();
         window.render_frame(cx);
-        window.click("advanced-title", cx);
+        window.click("0-2", cx);
         window.scroll(
             "settings-scroll",
             ScrollDelta::Pixels(point(px(0.), px(-600.))),
@@ -839,6 +925,8 @@ pub fn check_ui() {
                 .load(Ordering::Acquire),
             0
         );
+        window.click("0-0", cx);
+        assert!(window.try_find("input-permission").is_none());
         assert!(window.find("input-error").bounds().size.height > px(0.));
         assert!(window.find("settings-message").bounds().size.height > px(0.));
         window.scroll(
@@ -867,6 +955,7 @@ pub fn check_ui() {
             ScrollDelta::Pixels(point(px(0.), px(-600.))),
             cx,
         );
+        window.click("0-2", cx);
         window.click("open-viewer", cx);
     })
     .unwrap();
@@ -1007,6 +1096,12 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn initial_page_prioritizes_permission_attention_not_input_errors() {
+        assert_eq!(SettingsPage::initial(false), SettingsPage::General);
+        assert_eq!(SettingsPage::initial(true), SettingsPage::Permissions);
+    }
+
+    #[test]
     fn failed_save_and_reload_preserve_active_settings_and_startup_is_safe() {
         let dir =
             std::env::temp_dir().join(format!("caps-tap-settings-test-{}", std::process::id()));
@@ -1021,8 +1116,7 @@ mod tests {
         let input = Arc::new(Context::default());
         input.apply_config(&active);
         let mut settings = Settings {
-            customize_open: false,
-            advanced_open: false,
+            page: SettingsPage::General,
             system_facts: None,
             input: input.clone(),
             input_error: None,
