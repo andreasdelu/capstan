@@ -8,7 +8,7 @@ use gpui_kit::{
 
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Theme,
+    ActiveTheme, Disableable, IconName, Sizable, Theme,
     alert::Alert,
     button::Button,
     input::{Input, InputEvent, InputState},
@@ -145,8 +145,6 @@ impl Render for Settings {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let border = theme.border;
-        let surface = theme.background;
-        let panel = theme.secondary.opacity(0.35);
         let remapping = self.input.enabled.load(Ordering::Acquire);
         #[cfg(test)]
         let facts = self.system_facts.unwrap_or_else(|| SystemFacts {
@@ -163,9 +161,9 @@ impl Render for Settings {
         let status = if !usable {
             "Needs attention"
         } else if remapping {
-            "Remapping on"
+            "On"
         } else {
-            "Remapping off"
+            "Off"
         };
         let status_color = if !usable {
             theme.warning
@@ -175,100 +173,74 @@ impl Render for Settings {
             muted
         };
 
-        div().id("settings-scroll").size_full().overflow_y_scroll()
-            .bg(surface).text_color(theme.foreground).font_family(theme.font_family.clone())
-            .child(div().flex().flex_col().gap_6().p_6()
+        div().id("settings-scroll").test_support().size_full().overflow_y_scroll()
+            .bg(theme.background).text_color(theme.foreground).text_size(px(13.)).font_family(theme.font_family.clone())
+            .child(div().flex().flex_col().gap_4().p_4()
                 .child(div().flex().justify_between().items_center()
-                    .child(div().flex().flex_col().gap_1()
-                        .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Capstan"))
-                        .child(div().text_sm().text_color(muted).child("One key. Two useful jobs.")))
-                    .child(div().flex().items_center().gap_2().px_3().py_1().rounded_full().bg(status_color.opacity(0.1))
-                        .child(div().size_2().rounded_full().bg(status_color))
-                        .child(div().text_sm().text_color(status_color).child(status))))
-                .child(div().flex().items_center().justify_between().gap_4().p_5().rounded_xl().bg(panel).border_1().border_color(border)
-                    .child(div().flex().flex_col().gap_2()
-                        .child(div().text_sm().text_color(muted).child("Tap alone"))
-                        .child(div().flex().items_center().gap_2().child(keycap("Caps", cx)).child(Icon::new(IconName::ArrowRight)).child(keycap("Esc", cx))))
-                    .child(div().w_px().h_10().bg(border))
-                    .child(div().flex().flex_col().gap_2()
-                        .child(div().text_sm().text_color(muted).child("Hold with another key"))
-                        .child(div().flex().items_center().gap_2().child(keycap("Caps", cx)).child(Icon::new(IconName::ArrowRight)).child(keycap("Ctrl", cx)))))
+                    .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child("Capstan"))
+                    .child(div().flex().items_center().gap_2().text_size(px(11.)).text_color(status_color)
+                        .child(div().size(px(6.)).rounded_full().bg(status_color)).child(status)))
                 .when(!permissions.ready() || self.needs_restart, |view| view.child(self.permission_panel(permissions, cx)))
                 .when_some(self.input_error.clone(), |view, error| view.child(div().id("input-error").test_support().child(Alert::error("input-alert", error))))
                 .when_some(self.message.clone(), |view, feedback| view.child(div().id("settings-message").test_support().child(match feedback {
                     Feedback::Success(text) => Alert::success("settings-alert", text),
                     Feedback::Error(text) => Alert::error("settings-alert", text),
                 })))
-                .child(div().flex().flex_col().rounded_xl().border_1().border_color(border)
-                    .child(div().flex().justify_between().items_center().gap_4().p_4()
-                        .child(setting_label("Enable remapping", "Control immediately. Escape when tapped alone.", cx))
-                        .child(Switch::new("remapping").accessibility_label("Enable remapping").checked(remapping).disabled(!usable)
+                .child(div().flex().flex_col().rounded_lg().border_1().border_color(border)
+                    .child(div().flex().justify_between().items_center().gap_3().p_3()
+                        .child(setting_label("Remap Caps Lock", "Tap → Escape · Hold → Control", cx))
+                        .child(Switch::new("remapping").small().accessibility_label("Enable remapping").checked(remapping).disabled(!usable)
                             .on_change(cx.listener(|this, enabled, _, cx| {
-                                let config = config::Config { remapping_enabled: *enabled, ..this.config.clone() };
-                                this.message = this.save(config).err().map(Feedback::Error);
+                                this.message = this.save(config::Config { remapping_enabled: *enabled, ..this.config.clone() }).err().map(Feedback::Error);
                                 cx.notify();
                             }))))
                     .child(div().h_px().bg(border))
-                    .child(div().flex().flex_col().gap_3().p_4()
-                        .child(setting_label("Escape window", "Release before this limit to send Escape. A longer hold cancels it.", cx))
-                        .child(div().flex().items_center().gap_3()
-                            .child(Button::new("timeout-less").icon(IconName::Minus).accessibility_label("Decrease Escape window by 50 ms").tooltip("Decrease Escape window by 50 ms").disabled(!usable)
+                    .child(div().flex().flex_col().gap_2().p_3()
+                        .child(div().flex().items_center().justify_between().gap_2()
+                            .child(div().font_weight(FontWeight::MEDIUM).child("Tap timeout"))
+                            .child(div().text_size(px(11.)).text_color(muted).child(if usable {
+                                format!("Active: {} ms", self.config.escape_timeout_ms)
+                            } else { format!("Saved: {} ms", self.config.escape_timeout_ms) })))
+                        .child(div().flex().items_center().gap_2()
+                            .child(Button::new("timeout-less").small().icon(IconName::Minus).accessibility_label("Decrease Escape window by 50 ms").tooltip("Decrease by 50 ms").disabled(!usable)
                                 .on_click(cx.listener(|this, _, window, cx| this.step_timeout(false, window, cx))))
                             .when_some(self.timeout_input.clone(), |view, state| view.child(Input::new(&state)
-                                .id("escape-timeout").aria_label("Escape window in milliseconds").suffix("ms").w(px(112.)).disabled(!usable)))
-                            .child(Button::new("timeout-more").icon(IconName::Plus).accessibility_label("Increase Escape window by 50 ms").tooltip("Increase Escape window by 50 ms").disabled(!usable)
+                                .small().id("escape-timeout").aria_label("Escape window in milliseconds").suffix("ms").w(px(100.)).disabled(!usable)))
+                            .child(Button::new("timeout-more").small().icon(IconName::Plus).accessibility_label("Increase Escape window by 50 ms").tooltip("Increase by 50 ms").disabled(!usable)
                                 .on_click(cx.listener(|this, _, window, cx| this.step_timeout(true, window, cx))))
-                            .child(Button::new("apply-timeout").label("Apply").outline().disabled(!usable)
-                                .on_click(cx.listener(|this, _, window, cx| this.save_timeout(window, cx))))
-                            .child(div().text_xs().text_color(muted).child("50–2000 ms")))
-                        .child(div().text_xs().text_color(muted).child(if usable {
-                            format!("Active: {} ms · Changes apply to the next press", self.config.escape_timeout_ms)
-                        } else {
-                            format!("Saved: {} ms · Available after restart", self.config.escape_timeout_ms)
-                        })))
+                            .child(Button::new("apply-timeout").small().label("Apply").outline().disabled(!usable)
+                                .on_click(cx.listener(|this, _, window, cx| this.save_timeout(window, cx)))))
+                        .child(div().text_size(px(11.)).text_color(muted).child(if usable {
+                            "Hold longer to cancel Escape. Changes apply to the next press."
+                        } else { "Available after restart once input permissions are ready." })))
                     .child(div().h_px().bg(border))
-                    .child(div().flex().justify_between().items_center().gap_4().p_4()
-                        .child(setting_label("Launch at login", if bundled { "Keep Capstan available when you sign in." } else { "Open the bundled app to enable launch at login." }, cx))
-                        .child(Switch::new("login").accessibility_label("Launch at login").checked(login).disabled(!bundled)
+                    .child(div().flex().justify_between().items_center().gap_3().p_3()
+                        .child(setting_label("Launch at login", if bundled { "Start automatically when you sign in." } else { "Open the bundled app to enable this." }, cx))
+                        .child(Switch::new("login").small().accessibility_label("Launch at login").checked(login).disabled(!bundled)
                             .on_change(cx.listener(|this, enabled, _, cx| {
                                 this.message = mac::set_login_enabled(*enabled).err().map(Feedback::Error);
                                 cx.notify();
-                            })))))
-                .child(div().flex().flex_col().gap_3()
-                    .child(div().flex().justify_between().items_center()
-                        .child(div().font_weight(FontWeight::MEDIUM).child("Settings file"))
-                        .child(Button::new("reload-settings").label("Reload Settings").icon(IconName::RefreshCw).outline()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.message = Some(match this.reload() {
-                                    Ok(()) => { this.sync_timeout(window, cx); Feedback::Success("Settings reloaded".into()) },
-                                    Err(error) => Feedback::Error(format!("{error}. Current settings unchanged.")),
-                                });
-                                cx.notify();
                             }))))
-                    .child(div().text_sm().text_color(muted).child("Edit the JSON, then reload. No restart or rebuild needed."))
-                    .child(div().p_3().rounded_lg().bg(panel).border_1().border_color(border).text_xs().text_color(muted)
-                        .child("~/Library/Application Support/Capstan/settings.json")))
-                .child(div().flex().justify_between().items_center().gap_4()
-                    .child(setting_label("Show menu bar icon", "When hidden, open Capstan.app to return to settings.", cx))
-                    .child(Switch::new("show-menu-bar").accessibility_label("Show menu bar icon").checked(self.config.show_menu_bar_icon)
-                        .on_change(cx.listener(|this, enabled, _, cx| {
-                            this.message = this.save(config::Config { show_menu_bar_icon: *enabled, ..this.config.clone() }).err().map(Feedback::Error);
+                    .child(div().h_px().bg(border))
+                    .child(div().flex().justify_between().items_center().gap_3().p_3()
+                        .child(setting_label("Show menu bar icon", "Open Capstan.app to return when hidden.", cx))
+                        .child(Switch::new("show-menu-bar").small().accessibility_label("Show menu bar icon").checked(self.config.show_menu_bar_icon)
+                            .on_change(cx.listener(|this, enabled, _, cx| {
+                                this.message = this.save(config::Config { show_menu_bar_icon: *enabled, ..this.config.clone() }).err().map(Feedback::Error);
+                                cx.notify();
+                            })))))
+                .child(div().flex().justify_between().items_center().gap_3()
+                    .child(div().text_size(px(11.)).text_color(muted).child("Edited settings.json?"))
+                    .child(Button::new("reload-settings").small().label("Reload Settings").icon(IconName::RefreshCw).outline()
+                        .tooltip("~/Library/Application Support/Capstan/settings.json")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.message = Some(match this.reload() {
+                                Ok(()) => { this.sync_timeout(window, cx); Feedback::Success("Settings reloaded".into()) },
+                                Err(error) => Feedback::Error(format!("{error}. Current settings unchanged.")),
+                            });
                             cx.notify();
                         })))))
     }
-}
-
-fn keycap(label: &'static str, cx: &App) -> impl IntoElement {
-    div()
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().background)
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .child(label)
 }
 
 fn setting_label(title: &'static str, detail: &'static str, cx: &App) -> impl IntoElement {
@@ -278,10 +250,15 @@ fn setting_label(title: &'static str, detail: &'static str, cx: &App) -> impl In
         .gap_1()
         .flex_1()
         .min_w_0()
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
         .child(
             div()
-                .text_xs()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
                 .child(detail),
         )
@@ -353,11 +330,11 @@ pub fn run(input: Arc<Context>) {
         }
         let running = !needs_restart && input_error.is_none();
         let show_menu_bar_icon = config.show_menu_bar_icon;
-        let bounds = Bounds::centered(None, size(px(560.), px(760.)), cx);
+        let bounds = Bounds::centered(None, size(px(440.), px(430.)), cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(520.), px(560.))),
+                window_min_size: Some(size(px(420.), px(340.))),
                 titlebar: Some(gpui_kit::TitlebarOptions {
                     title: Some("Capstan".into()),
                     ..Default::default()
@@ -401,7 +378,7 @@ pub fn run(input: Arc<Context>) {
 pub fn check_ui() {
     use gpui_kit::component::ThemeMode;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, Focusable, HeadlessAppContext};
+    use gpui_kit::{AppContext, Focusable, HeadlessAppContext, ScrollDelta, point};
     use std::fs;
 
     let dir = std::env::temp_dir().join(format!("caps-tap-ui-test-{}", std::process::id()));
@@ -428,7 +405,7 @@ pub fn check_ui() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: Default::default(),
-                        size: size(px(560.), px(760.)),
+                        size: size(px(440.), px(430.)),
                     })),
                     focus: false,
                     show: false,
@@ -483,6 +460,11 @@ pub fn check_ui() {
         );
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
         window.click("timeout-less", cx);
+        window.click("show-menu-bar", cx);
+        assert!(!config::load(&path).unwrap().show_menu_bar_icon);
+        assert!(input.enabled.load(Ordering::Acquire));
+        window.click("show-menu-bar", cx);
+        assert!(config::load(&path).unwrap().show_menu_bar_icon);
         window.click("remapping", cx);
         assert!(!input.enabled.load(Ordering::Acquire));
         assert!(!config::load(&path).unwrap().remapping_enabled);
@@ -522,6 +504,11 @@ pub fn check_ui() {
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
         assert!(matches!(view.read(cx).message, Some(Feedback::Error(_))));
         fs::write(&path, "invalid JSON").unwrap();
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            cx,
+        );
         window.click("reload-settings", cx);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 650);
         let reloaded = config::Config {
@@ -529,6 +516,11 @@ pub fn check_ui() {
             ..active.clone()
         };
         config::save(&path, &reloaded).unwrap();
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            cx,
+        );
         window.click("reload-settings", cx);
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
         assert_eq!(editor.read(cx).value(), "400");
@@ -538,6 +530,11 @@ pub fn check_ui() {
             cx.notify();
         });
         window.render_frame(cx);
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(600.))),
+            cx,
+        );
     })
     .unwrap();
     app.capture_screenshot(handle)
@@ -595,6 +592,11 @@ pub fn check_ui() {
         )
         .unwrap();
         window.render_frame(cx);
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            cx,
+        );
         window.click("reload-settings", cx);
         assert_eq!(view.read(cx).config.escape_timeout_ms, 500);
         assert!(!view.read(cx).input.enabled.load(Ordering::Acquire));
@@ -607,6 +609,11 @@ pub fn check_ui() {
         );
         assert!(window.find("input-error").bounds().size.height > px(0.));
         assert!(window.find("settings-message").bounds().size.height > px(0.));
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(600.))),
+            cx,
+        );
     })
     .unwrap();
     app.capture_screenshot(handle)
