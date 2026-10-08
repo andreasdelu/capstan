@@ -86,10 +86,16 @@ impl Gesture {
             }
             .into();
         }
+        if self.active {
+            return if self.generation_failed {
+                "Holding… (failed)"
+            } else {
+                "Holding…"
+            }
+            .into();
+        }
         let (tap, held, _) = self.mapping.unwrap();
-        let result = if self.active {
-            "Holding…"
-        } else if self.result == "Chord" {
+        let result = if self.result == "Chord" {
             "Hold (chord)"
         } else {
             self.result
@@ -343,7 +349,7 @@ mod tests {
         let start = Duration::from_secs(10);
         state.press(start, Duration::from_millis(300));
         let pending = gestures(&state.diagnostics.rows.iter().cloned().collect::<Vec<_>>());
-        assert_eq!(pending[0].label(), "Holding… · — · Control");
+        assert_eq!(pending[0].label(), "Holding…");
         assert!(state.press(start, Duration::from_millis(300)).is_none());
         let changed = super::super::config::Config {
             tap_key: TapKey::Tab,

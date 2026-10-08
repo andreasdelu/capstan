@@ -1178,10 +1178,7 @@ pub fn check_ui() {
         }
         window.render_frame(cx);
         assert_eq!(window.find("viewer-record").label(), Some("Stop"));
-        assert_eq!(
-            window.find(("gesture", 0_usize)).label(),
-            Some("Holding… · — · Control")
-        );
+        assert_eq!(window.find(("gesture", 0_usize)).label(), Some("Holding…"));
     })
     .unwrap();
     app.capture_screenshot(viewer)
