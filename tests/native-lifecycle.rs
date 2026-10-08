@@ -1,0 +1,53 @@
+#![allow(unexpected_cfgs)] // objc 0.2 legacy macro cfgs.
+// Real AppKit delegate regression check, without input taps, settings writes,
+// Login Items, or touching the user's running app. Runs on its own main thread.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/mac.rs"]
+mod mac;
+
+use cocoa::base::{id, nil};
+use cocoa::foundation::{NSPoint, NSRect, NSSize};
+use objc::runtime::{BOOL, NO, YES};
+use objc::{class, msg_send, sel, sel_impl};
+
+fn main() {
+    let application = gpui_kit::application();
+    application.on_reopen(|_| mac::show_settings());
+    application.run(|cx| unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let delegate: id = msg_send![app, delegate];
+        let window: id = msg_send![class!(NSWindow), alloc];
+        let window: id = msg_send![window,
+            initWithContentRect: NSRect::new(NSPoint::new(0., 0.), NSSize::new(100., 100.))
+            styleMask: 1usize backing: 2usize defer: NO];
+        let _: () = msg_send![window, setReleasedWhenClosed: NO];
+        // This is the upstream failure seam: visible-window reopen never calls
+        // Application::on_reopen, leaving the application in accessory mode.
+        let _: BOOL = msg_send![app, setActivationPolicy: 1isize];
+        let _: () = msg_send![delegate, applicationShouldHandleReopen: app hasVisibleWindows: YES];
+        let before: isize = msg_send![app, activationPolicy];
+        assert_eq!(before, 1, "upstream visible-window callback must reproduce the skipped recovery");
+
+        mac::install_reopen_handler();
+        for visible in [YES, NO] {
+            let _: () = msg_send![window, orderOut: nil];
+            let before: BOOL = msg_send![window, isVisible];
+            assert_eq!(before, NO, "each case must begin with an ordered-out window");
+            mac::hide_settings();
+            let hidden: isize = msg_send![app, activationPolicy];
+            assert_eq!(hidden, 1);
+            let handled: BOOL = msg_send![delegate, applicationShouldHandleReopen: app hasVisibleWindows: visible];
+            assert_eq!(handled, NO, "Capstan must suppress default reopen handling");
+            let policy: isize = msg_send![app, activationPolicy];
+            let window_visible: BOOL = msg_send![window, isVisible];
+
+            assert_eq!(policy, 0, "reopen must restore regular Dock activation policy");
+            assert_eq!(window_visible, YES, "reopen must order settings into view");
+
+        }
+        let _: () = msg_send![window, orderOut: nil];
+        let _: () = msg_send![window, release];
+        println!("Native reopen: visible and hidden window paths restore Dock policy and window visibility");
+        cx.quit();
+    });
+}

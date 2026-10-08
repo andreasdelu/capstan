@@ -312,9 +312,9 @@ pub fn run(input: Arc<Context>) {
         .and_then(|path| config::load_or_create(path, mac::remapping_enabled()));
     let (config, message) = startup_config(loaded);
     let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
-    application.on_reopen(|_| mac::show_settings());
     application.run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        mac::install_reopen_handler();
         Theme::sync_system_appearance(None, cx);
         let needs_restart = !mac::permissions().ready();
         let input_error = if needs_restart {

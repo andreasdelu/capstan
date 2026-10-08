@@ -263,6 +263,37 @@ extern "C" fn open_settings(_target: &Object, _selector: Sel, _sender: id) {
     show_settings();
 }
 
+// GPUI gates on_reopen on AppKit's hasVisibleWindows flag. An accessory app
+// must restore its Dock presence even when macOS considers a window visible.
+// Replace this single-application process's GPUI delegate-class reopen method,
+// not the delegate object or other lifecycle callbacks. Install during GPUI's
+// finish-launch callback, after the delegate and activation policy are set.
+pub fn install_reopen_handler() {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let delegate: id = msg_send![app, delegate];
+        assert!(
+            !delegate.is_null(),
+            "Capstan requires the launched GPUI delegate"
+        );
+        let method = (*delegate)
+            .class()
+            .instance_method(sel!(applicationShouldHandleReopen:hasVisibleWindows:))
+            .expect("GPUI delegate must implement application reopen");
+        let implementation = std::mem::transmute::<
+            extern "C" fn(&Object, Sel, id, BOOL) -> BOOL,
+            objc::runtime::Imp,
+        >(handle_reopen);
+        objc::runtime::method_setImplementation(method as *const _ as *mut _, implementation);
+    }
+}
+
+extern "C" fn handle_reopen(_: &Object, _: Sel, _: id, _: BOOL) -> BOOL {
+    show_settings();
+    // Capstan has already handled window ordering and activation.
+    NO
+}
+
 pub fn show_settings() {
     unsafe {
         let app: id = msg_send![class!(NSApplication), sharedApplication];
