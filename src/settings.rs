@@ -9,6 +9,7 @@ use gpui_kit::{
 use gpui_kit::TestSupportExt;
 use gpui_kit::component::{
     ActiveTheme, Disableable, IconName, IndexPath, Sizable, Theme, TitleBar,
+    accordion::Accordion,
     alert::Alert,
     button::Button,
     input::{Input, InputEvent, InputState},
@@ -33,6 +34,8 @@ struct SystemFacts {
 }
 
 struct Settings {
+    customize_open: bool,
+    advanced_open: bool,
     #[cfg(test)]
     system_facts: Option<SystemFacts>,
     input: Arc<Context>,
@@ -273,7 +276,10 @@ impl Render for Settings {
                                 this.message = this.save(config::Config { remapping_enabled: *enabled, ..this.config.clone() }).err().map(Feedback::Error);
                                 cx.notify();
                             }))))
-                    .child(div().h_px().bg(border))
+                    .child(div().px_3().pb_2().text_size(px(11.)).text_color(muted).child(format!("Tap {} · Hold {} · {} ms", self.config.tap_key.label(), self.config.hold_modifier.label(), self.config.escape_timeout_ms)))
+                    .child(Accordion::new("customize-remapping").small().bordered(false)
+                        .item(|item| item.open(self.customize_open).title(div().id("customize-title").test_support().child("Customize remapping"))
+                    .when(self.customize_open, |item| item
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
                         .child(setting_label("On tap", "Released alone before the timeout.", cx))
                         .when_some(self.tap_select.clone(), |view, state| view.child(div().w(px(145.)).h(px(28.)).child(Select::new(&state).id("tap-key").small().accessibility_label("On tap key").disabled(!usable)))))
@@ -298,8 +304,13 @@ impl Render for Settings {
                             .child(Button::new("apply-timeout").small().label("Apply").outline().disabled(!usable)
                                 .on_click(cx.listener(|this, _, window, cx| this.save_timeout(window, cx)))))
                         .child(div().text_size(px(11.)).text_color(muted).child(if usable {
-                            "Hold longer to cancel the tap. Changes apply to the next press."
-                        } else { "Available after restart once input permissions are ready." })))
+                            "Release Caps before this time to send the tap key. Holding longer cancels it."
+                        } else { "Available after restart once input permissions are ready." })))))
+                        .on_toggle_click(cx.listener(|this, indices: &[usize], window, cx| {
+                            this.customize_open = !indices.is_empty();
+                            if !this.customize_open { window.blur(cx); }
+                            cx.notify();
+                        })))
                     .child(div().h_px().bg(border))
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
                         .child(setting_label("Launch at login", if bundled { "Start automatically when you sign in." } else { "Open the bundled app to enable this." }, cx))
@@ -308,15 +319,18 @@ impl Render for Settings {
                                 this.message = mac::set_login_enabled(*enabled).err().map(Feedback::Error);
                                 cx.notify();
                             }))))
-                    .child(div().h_px().bg(border))
+                    )
+                .child(Accordion::new("advanced").small()
+                    .item(|item| item.open(self.advanced_open).title(div().id("advanced-title").test_support().child("Advanced"))
+                    .when(self.advanced_open, |item| item
                     .child(div().flex().justify_between().items_center().gap_3().p_3()
                         .child(setting_label("Show menu bar icon", "Open Capstan.app to return when hidden.", cx))
                         .child(Switch::new("show-menu-bar").small().accessibility_label("Show menu bar icon").checked(self.config.show_menu_bar_icon)
                             .on_change(cx.listener(|this, enabled, _, cx| {
                                 this.message = this.save(config::Config { show_menu_bar_icon: *enabled, ..this.config.clone() }).err().map(Feedback::Error);
                                 cx.notify();
-                            })))))
-                .child(div().flex().justify_between().items_center().gap_3()
+                            }))))
+                .child(div().flex().flex_col().gap_2()
                     .child(Button::new("open-viewer").small().label("Event Viewer").outline()
                         .on_click(cx.listener(|this, _, _, cx| super::viewer::open(this.input.clone(), &mut this.viewer_window, cx))))
                     .child(div().text_size(px(11.)).text_color(muted).child("Edited settings.json?"))
@@ -329,6 +343,11 @@ impl Render for Settings {
                             });
                             cx.notify();
                         }))))))
+                    .on_toggle_click(cx.listener(|this, indices: &[usize], window, cx| {
+                        this.advanced_open = !indices.is_empty();
+                        if !this.advanced_open { window.blur(cx); }
+                        cx.notify();
+                    })))))
     }
 }
 
@@ -441,6 +460,8 @@ pub fn run(input: Arc<Context>) {
                 });
                 cx.new(|cx| {
                     let mut settings = Settings {
+                        customize_open: false,
+                        advanced_open: false,
                         #[cfg(test)]
                         system_facts: None,
                         input,
@@ -497,7 +518,10 @@ pub fn check_ui() {
         Arc::new(gpui_kit::assets::Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    app.update(gpui_kit::init);
+    app.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+    });
     let (handle, view) = app
         .update(|cx| {
             gpui_kit::open_window(
@@ -514,6 +538,8 @@ pub fn check_ui() {
                 |window, cx| {
                     cx.new(|cx| {
                         let mut settings = Settings {
+                            customize_open: false,
+                            advanced_open: false,
                             system_facts: Some(SystemFacts {
                                 permissions: mac::Permissions {
                                     input_monitoring: true,
@@ -546,13 +572,48 @@ pub fn check_ui() {
     app.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(window.find("remapping").checked(), Some(true));
+        for id in [
+            "apply-timeout",
+            "tap-key",
+            "hold-modifier",
+            "reload-settings",
+            "open-viewer",
+            "show-menu-bar",
+        ] {
+            assert!(
+                window.try_find(id).is_none(),
+                "{id} must be unmounted while collapsed"
+            );
+        }
+        assert!(window.find("login").visible());
+    })
+    .unwrap();
+    app.capture_screenshot(handle)
+        .unwrap()
+        .save("dist/qa/settings-light.png")
+        .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        Theme::change(ThemeMode::Dark, Some(window), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    app.capture_screenshot(handle)
+        .unwrap()
+        .save("dist/qa/settings-dark.png")
+        .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        Theme::change(ThemeMode::Light, Some(window), cx);
+        window.render_frame(cx);
+        window.click("customize-title", cx);
+        window.click("advanced-title", cx);
+        assert!(view.read(cx).customize_open && view.read(cx).advanced_open);
         assert!(window.find("apply-timeout").bounds().size.width > px(0.));
         let viewport = window.find("settings-scroll").bounds();
         let reload = window.find("reload-settings").bounds();
         assert!(reload.origin.y >= viewport.origin.y);
         assert!(
-            reload.bottom() <= viewport.bottom(),
-            "Reload must fit the normal compact window: reload={reload:?}, viewport={viewport:?}"
+            reload.bottom() > viewport.bottom(),
+            "Expanded controls scroll"
         );
         assert_eq!(
             window.find("escape-timeout").label(),
@@ -611,11 +672,21 @@ pub fn check_ui() {
         );
         assert_eq!(input.escape_timeout_ms.load(Ordering::Acquire), 400);
         window.click("timeout-less", cx);
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            cx,
+        );
         window.click("show-menu-bar", cx);
         assert!(!config::load(&path).unwrap().show_menu_bar_icon);
         assert!(input.enabled.load(Ordering::Acquire));
         window.click("show-menu-bar", cx);
         assert!(config::load(&path).unwrap().show_menu_bar_icon);
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(600.))),
+            cx,
+        );
         window.click("remapping", cx);
         assert!(!input.enabled.load(Ordering::Acquire));
         assert!(!config::load(&path).unwrap().remapping_enabled);
@@ -692,7 +763,7 @@ pub fn check_ui() {
     .unwrap();
     app.capture_screenshot(handle)
         .expect("Metal rendering unavailable")
-        .save("dist/qa/settings-light.png")
+        .save("dist/qa/settings-expanded-light.png")
         .unwrap();
     app.update_window(handle, |_, window, cx| {
         Theme::change(ThemeMode::Dark, Some(window), cx);
@@ -701,7 +772,7 @@ pub fn check_ui() {
     .unwrap();
     app.capture_screenshot(handle)
         .unwrap()
-        .save("dist/qa/settings-dark.png")
+        .save("dist/qa/settings-expanded-dark.png")
         .unwrap();
     app.update_window(handle, |_, window, cx| {
         Theme::change(ThemeMode::Light, Some(window), cx);
@@ -715,6 +786,11 @@ pub fn check_ui() {
             cx.notify();
         });
         window.render_frame(cx);
+        window.click("customize-title", cx);
+        window.click("advanced-title", cx);
+        assert!(window.try_find("escape-timeout").is_none());
+        let editor = view.read(cx).timeout_input.clone().unwrap();
+        assert!(!editor.focus_handle(cx).is_focused(window));
         // Kit does not report the switch's disabled property in this snapshot;
         // the real click below verifies that its controlled value cannot change.
         let permission = window.find("input-permission").bounds();
@@ -747,6 +823,7 @@ pub fn check_ui() {
         )
         .unwrap();
         window.render_frame(cx);
+        window.click("advanced-title", cx);
         window.scroll(
             "settings-scroll",
             ScrollDelta::Pixels(point(px(0.), px(-600.))),
@@ -859,6 +936,8 @@ mod tests {
         let input = Arc::new(Context::default());
         input.apply_config(&active);
         let mut settings = Settings {
+            customize_open: false,
+            advanced_open: false,
             system_facts: None,
             input: input.clone(),
             input_error: None,
