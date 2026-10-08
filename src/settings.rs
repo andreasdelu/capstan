@@ -946,6 +946,11 @@ pub fn check_ui() {
     app.update_window(viewer, |_, window, cx| {
         window.click("viewer-details-title", cx);
         assert!(window.find("viewer-raw").bounds().size.height > px(0.));
+        window.scroll(
+            "viewer-events",
+            ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            cx,
+        );
     })
     .unwrap();
     app.capture_screenshot(viewer)
@@ -953,6 +958,11 @@ pub fn check_ui() {
         .save("dist/qa/event-viewer-details.png")
         .unwrap();
     app.update_window(viewer, |_, window, cx| {
+        window.scroll(
+            "viewer-events",
+            ScrollDelta::Pixels(point(px(0.), px(600.))),
+            cx,
+        );
         window.click("viewer-details-title", cx);
         assert!(window.try_find("viewer-raw").is_none());
         window.click("viewer-clear", cx);
