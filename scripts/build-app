@@ -6,10 +6,13 @@ if ! security find-identity -v -p codesigning | grep -Fq "\"$signing_identity\""
   printf 'No valid code-signing identity named %s; create/trust it in Keychain Access.\n' "$signing_identity" >&2
   exit 1
 fi
-cargo build --release
+cargo build --release --locked
 app="dist/Capstan.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/capstan "$app/Contents/MacOS/capstan"
+# Remove local symbols from the packaged copy, not the development artifact.
+# Signing must happen afterward because stripping changes executable bytes.
+xcrun strip -x "$app/Contents/MacOS/capstan"
 icon_tmp=$(mktemp -d)
 trap 'rm -rf "$icon_tmp"' EXIT
 # Compile the layered Icon Composer source instead of resizing a flattened
