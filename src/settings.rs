@@ -44,6 +44,7 @@ struct Settings {
     tap_select: Option<Entity<SelectState<SearchableVec<&'static str>>>>,
     hold_select: Option<Entity<SelectState<SearchableVec<&'static str>>>>,
     mapping_subscriptions: Vec<Subscription>,
+    viewer_window: Option<gpui_kit::AnyWindowHandle>,
     config: config::Config,
     config_path: Result<std::path::PathBuf, String>,
 }
@@ -97,8 +98,11 @@ impl Settings {
             self.mapping_subscriptions.push(cx.subscribe_in(
                 &state,
                 window,
-                move |this, _, event, window, cx| {
+                move |this, source, event, window, cx| {
                     if let SelectEvent::Confirm(Some(label)) = event {
+                        if source.read(cx).selected_value() != Some(label) {
+                            return; // Ignore a deferred confirmation superseded by reload.
+                        }
                         let mut config = this.config.clone();
                         if tap {
                             if let Some(value) = config::TapKey::ALL
@@ -313,6 +317,8 @@ impl Render for Settings {
                                 cx.notify();
                             })))))
                 .child(div().flex().justify_between().items_center().gap_3()
+                    .child(Button::new("open-viewer").small().label("Event Viewer").outline()
+                        .on_click(cx.listener(|this, _, _, cx| super::viewer::open(this.input.clone(), &mut this.viewer_window, cx))))
                     .child(div().text_size(px(11.)).text_color(muted).child("Edited settings.json?"))
                     .child(Button::new("reload-settings").small().label("Reload Settings").icon(IconName::RefreshCw).outline()
                         .tooltip("~/Library/Application Support/Capstan/settings.json")
@@ -414,7 +420,7 @@ pub fn run(input: Arc<Context>) {
         let running = !needs_restart && input_error.is_none();
         let menu_input = input.clone();
         let show_menu_bar_icon = config.show_menu_bar_icon;
-        let bounds = Bounds::centered(None, size(px(440.), px(620.)), cx);
+        let bounds = Bounds::centered(None, size(px(440.), px(570.)), cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -448,6 +454,7 @@ pub fn run(input: Arc<Context>) {
                         tap_select: None,
                         hold_select: None,
                         mapping_subscriptions: vec![],
+                        viewer_window: None,
                     };
                     settings.setup_timeout(window, cx);
                     settings
@@ -497,7 +504,7 @@ pub fn check_ui() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
                         origin: Default::default(),
-                        size: size(px(440.), px(620.)),
+                        size: size(px(440.), px(570.)),
                     })),
                     focus: false,
                     show: false,
@@ -524,6 +531,7 @@ pub fn check_ui() {
                             tap_select: None,
                             hold_select: None,
                             mapping_subscriptions: vec![],
+                            viewer_window: None,
                             config: active.clone(),
                             config_path: Ok(path.clone()),
                         };
@@ -567,6 +575,30 @@ pub fn check_ui() {
             config::load(&path).unwrap().hold_modifier,
             config::HoldModifier::Shift
         );
+        fs::write(
+            path.with_extension(format!("json.{}.tmp", std::process::id())),
+            "other writer",
+        )
+        .unwrap();
+        window.within("tap-key").click("input", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        assert!(matches!(view.read(cx).message, Some(Feedback::Error(_))));
+        assert_eq!(window.find("tap-key").value(), Some("Tab"));
+        assert_eq!(
+            input.state.lock().unwrap().config.tap_key,
+            config::TapKey::Tab
+        );
+        assert_eq!(config::load(&path).unwrap().tap_key, config::TapKey::Tab);
+        fs::remove_file(path.with_extension(format!("json.{}.tmp", std::process::id()))).unwrap();
+        view.update(cx, |view, cx| {
+            view.message = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
         window.click("timeout-more", cx);
         assert_eq!(
             view.read(cx)
@@ -748,6 +780,59 @@ pub fn check_ui() {
         .unwrap()
         .save("dist/qa/settings-input-error.png")
         .unwrap();
+    app.update_window(handle, |_, window, cx| {
+        view.update(cx, |view, cx| {
+            view.input = input.clone();
+            cx.notify();
+        });
+        window.scroll(
+            "settings-scroll",
+            ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            cx,
+        );
+        window.click("open-viewer", cx);
+    })
+    .unwrap();
+    let mut viewer_handle = app.update(|cx| view.read(cx).viewer_window);
+    let viewer = viewer_handle.unwrap();
+    app.update(|cx| super::viewer::open(input.clone(), &mut viewer_handle, cx));
+    assert_eq!(viewer_handle.unwrap(), viewer, "reuse the existing viewer");
+    app.update_window(viewer, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("viewer-record", cx);
+        assert!(input.state.lock().unwrap().diagnostics.recording);
+        {
+            let mut state = input.state.lock().unwrap();
+            state.press(
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_millis(300),
+            );
+            state.release(std::time::Duration::from_millis(10100));
+        }
+        window.render_frame(cx);
+        window.click("viewer-record", cx);
+        assert!(!input.state.lock().unwrap().diagnostics.recording);
+        assert_eq!(input.state.lock().unwrap().diagnostics.rows.len(), 2);
+    })
+    .unwrap();
+    app.capture_screenshot(viewer)
+        .unwrap()
+        .save("dist/qa/event-viewer.png")
+        .unwrap();
+    app.update_window(viewer, |_, window, cx| {
+        window.click("viewer-clear", cx);
+        assert!(input.state.lock().unwrap().diagnostics.rows.is_empty());
+        assert!(
+            input.enabled.load(Ordering::Acquire),
+            "viewer controls must not disable input"
+        );
+        window.click("viewer-record", cx);
+        window.remove_window();
+    })
+    .unwrap();
+    app.update(|_| {});
+    assert!(!input.state.lock().unwrap().diagnostics.recording);
+    assert!(input.state.lock().unwrap().diagnostics.rows.is_empty());
     fs::remove_dir_all(dir).unwrap();
     println!(
         "Settings UI: real switch/apply/reload interactions and light/dark/permission Metal renders passed"
@@ -784,6 +869,7 @@ mod tests {
             tap_select: None,
             hold_select: None,
             mapping_subscriptions: vec![],
+            viewer_window: None,
             config: active.clone(),
             config_path: Ok(path.clone()),
         };

@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod config;
-#[allow(dead_code)] // The next capability connects this bounded model to the viewer.
 mod diagnostics;
+mod viewer;
 use diagnostics::{Decision, Diagnostics, Event};
 mod mac;
 mod settings;
@@ -223,7 +223,7 @@ unsafe extern "C" fn hid_callback(context: Ref, result: i32, _sender: Ref, value
     let down = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
     let timestamp = mac::hid_timestamp(unsafe { IOHIDValueGetTimeStamp(value) });
     let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
-    if !state.config.remapping_enabled {
+    if !context.enabled.load(Ordering::Acquire) || !state.config.remapping_enabled {
         return;
     }
     if down {

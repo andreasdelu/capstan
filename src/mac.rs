@@ -312,7 +312,14 @@ pub fn show_settings() {
         let count: usize = msg_send![windows, count];
         for index in 0..count {
             let window: id = msg_send![windows, objectAtIndex: index];
-            let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+            // Restore only settings, never resurrect a closed/ordered-out viewer.
+            let title: id = msg_send![window, title];
+            let expected = NSString::alloc(nil).init_str("Capstan");
+            let settings: BOOL = msg_send![title, isEqualToString: expected];
+            let _: () = msg_send![expected, release];
+            if settings == YES {
+                let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+            }
         }
         let _: () = msg_send![app, activateIgnoringOtherApps: YES];
     }

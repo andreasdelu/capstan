@@ -6,7 +6,7 @@
 mod mac;
 
 use cocoa::base::{id, nil};
-use cocoa::foundation::{NSPoint, NSRect, NSSize};
+use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::{BOOL, NO, YES};
 use objc::{class, msg_send, sel, sel_impl};
 
@@ -21,6 +21,16 @@ fn main() {
             initWithContentRect: NSRect::new(NSPoint::new(0., 0.), NSSize::new(100., 100.))
             styleMask: 1usize backing: 2usize defer: NO];
         let _: () = msg_send![window, setReleasedWhenClosed: NO];
+        let title = cocoa::foundation::NSString::alloc(nil).init_str("Capstan");
+        let _: () = msg_send![window, setTitle: title];
+        let viewer: id = msg_send![class!(NSWindow), alloc];
+        let viewer: id = msg_send![viewer,
+            initWithContentRect: NSRect::new(NSPoint::new(0., 0.), NSSize::new(100., 100.))
+            styleMask: 1usize backing: 2usize defer: NO];
+        let _: () = msg_send![viewer, setReleasedWhenClosed: NO];
+        let title = cocoa::foundation::NSString::alloc(nil).init_str("Capstan Event Viewer");
+        let _: () = msg_send![viewer, setTitle: title];
+        let _: () = msg_send![viewer, orderOut: nil];
         // This is the upstream failure seam: visible-window reopen never calls
         // Application::on_reopen, leaving the application in accessory mode.
         let _: BOOL = msg_send![app, setActivationPolicy: 1isize];
@@ -43,10 +53,13 @@ fn main() {
 
             assert_eq!(policy, 0, "reopen must restore regular Dock activation policy");
             assert_eq!(window_visible, YES, "reopen must order settings into view");
+            let viewer_visible: BOOL = msg_send![viewer, isVisible];
+            assert_eq!(viewer_visible, NO, "settings reopen must not resurrect the viewer");
 
         }
         let _: () = msg_send![window, orderOut: nil];
         let _: () = msg_send![window, release];
+        let _: () = msg_send![viewer, release];
         println!("Native reopen: visible and hidden window paths restore Dock policy and window visibility");
         cx.quit();
     });
